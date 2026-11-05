@@ -27,6 +27,8 @@ jobs:
         run: |
           $exe = Get-ChildItem dist/*.exe | Select-Object -First 1
           $testRoot = Join-Path $env:RUNNER_TEMP 'patient-app-test'
+          Rename-Item 'C:\Program Files\Tesseract-OCR' 'Tesseract-OCR-build-only'
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
           $p = Start-Process -FilePath $exe.FullName -ArgumentList '--self-test', $testRoot -PassThru
           if (-not $p.WaitForExit(180000)) { $p.Kill(); throw 'Packaged self-test timed out' }
           if ($p.ExitCode -ne 0) { throw "Packaged self-test failed with exit $($p.ExitCode)" }
