@@ -136,6 +136,13 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(any(v['result']=='88,5*32' and v['side']=='Правая' for v in values))
         self.assertTrue(any(v['result']=='6,4-3,6-5,6' and v['number'] is None for v in values))
 
+    def test_narrative_label_does_not_leak_from_previous_measurement(self):
+        text='Дата выполнения услуги: 02.03.2025\nОбъем мочевого пузыря 80 мл.\nПравая почка 90*40 мм.\nКреатинин 66 мкмоль/л.\nДругой показатель 5 ммоль/л.'
+        values=analysis.analyze({'pages':[text],'ocr_pages':[]},'study.txt')['observations']
+        self.assertEqual(next(v for v in values if v['result']=='90*40')['label'],'Размеры почки')
+        unknown=next(v for v in values if v['result']=='5')
+        self.assertEqual(unknown['label'],'Измерение из описания');self.assertEqual(unknown['status'],'Проверить')
+
     def test_same_birth_different_names_never_merge(self):
         self.sample();self.sample('another.txt',SAMPLE.replace('ТЕСТОВ ТЕСТ ТЕСТОВИЧ','ПРИМЕРОВ ПРИМЕР ПРИМЕРОВИЧ'))
         self.assertEqual(self.workspace.import_folder()['patients'],2)

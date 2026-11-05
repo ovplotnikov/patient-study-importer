@@ -39,13 +39,14 @@ def side_from(text):
 def metric_from(text, default):
     labels=[('Паренхима',r'паренхим|\bпар\b'),('Лоханка',r'лохан|члс'),('Чашечки',r'чашеч'),
             ('Мочеточник',r'мочеточник'),('Остаточная моча',r'остаточ|после мочеиспуск'),
-            ('Объём мочевого пузыря',r'объем|объём'),('Креатинин',r'креатинин'),('Мочевина',r'мочевин'),
+            ('Объём',r'объем|объём'),('Креатинин',r'креатинин'),('Мочевина',r'мочевин'),
             ('Гемоглобин',r'гемоглоб|\bHb\b'),('Белок',r'белок|белка'),('Рост',r'рост'),('Масса',r'масса|\bвес\b|\bМ='),
             ('Стенка',r'стенк'),('Клиренс',r'клиренс'),('Накопление препарата',r'накоплен'),('Перфузия',r'uptake|перфуз')]
     candidates=[]
     for label,pattern in labels:
         hits=list(re.finditer(pattern,text,re.I))
-        if hits:candidates.append((hits[-1].start(),label))
+        # A label followed by an earlier value must not label the next unknown metric.
+        if hits and not re.search(r'\d',text[hits[-1].end():]):candidates.append((hits[-1].start(),label))
     return max(candidates)[1] if candidates else default
 
 
@@ -84,7 +85,9 @@ def narrative(pages, day, ocr_pages):
                 side=side_from(context+' '+before)
                 if not side or not re.search(r'почк|размер|паренхим|\bRD\b|\bRS\b',context+' '+before,re.I):continue
                 # A printed dimension pair is retained as a pair, without assigning axes.
-                fragments.append((match.start(),match.end(),metric_from(context+' '+before,'Размеры почки'),match[1],match[2] or '',side))
+                metric=metric_from(context+' '+before,'Размеры почки')
+                if metric not in {'Паренхима','Лоханка','Чашечки','Мочеточник'}:metric='Размеры почки'
+                fragments.append((match.start(),match.end(),metric,match[1],match[2] or '',side))
             occupied=[(start,end) for start,end,*_ in fragments]
             for match in MEASUREMENT.finditer(clean):
                 if any(start<=match.start()<end for start,end in occupied):continue
