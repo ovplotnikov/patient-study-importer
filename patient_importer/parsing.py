@@ -31,6 +31,10 @@ def identity(pages):
     """Use patient header labels, never doctor names or names inside narrative."""
     names, births, cards = set(), set(), set()
     for page in pages:
+        # Standalone signature pages identify the signer, not the patient.
+        certificate=bool(re.search(r'сертификат|электронн.{0,20}подпис',page,re.I|re.S))
+        clinical=bool(re.search(r'пациент|дата\s+рождения|показател|результат|фамилия|заключени|диагноз',page,re.I))
+        if certificate and not clinical:continue
         header = '\n'.join(line for line in page.splitlines() if line.strip())
         header = '\n'.join(header.splitlines()[:45])
         for match in re.finditer(rf'^[ \t]*{NAME_LABEL}[ \t]*:[ \t]*([^\n]*)', header, re.M | re.I):

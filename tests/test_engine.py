@@ -140,6 +140,12 @@ class EngineTests(unittest.TestCase):
         self.sample();self.sample('another.txt',SAMPLE.replace('ТЕСТОВ ТЕСТ ТЕСТОВИЧ','ПРИМЕРОВ ПРИМЕР ПРИМЕРОВИЧ'))
         self.assertEqual(self.workspace.import_folder()['patients'],2)
 
+    def test_certificate_signer_is_not_a_patient(self):
+        certificate='ДОКУМЕНТ ПОДПИСАН ЭЛЕКТРОННОЙ ПОДПИСЬЮ\nСертификат: 1234\nФИО: ВРАЧ ТЕСТ ТЕСТОВИЧ'
+        result=analysis.analyze({'pages':[SAMPLE,certificate],'native_pages':[SAMPLE,''],'ocr_pages':[2]},'study.pdf')
+        self.assertEqual(result['names'],['ТЕСТОВ ТЕСТ ТЕСТОВИЧ'])
+        self.assertFalse(result['identity_from_ocr'])
+
     def test_docx_tables_are_imported(self):
         from docx import Document
         path=self.workspace.root/'Входящие'/'sample.docx';doc=Document()
