@@ -4,6 +4,7 @@ from datetime import datetime
 import hashlib
 import json
 import re
+import unicodedata
 
 from .parsing import identity, laboratory_rows, document_date, normalized, iso_date, study_type
 
@@ -18,7 +19,7 @@ DATE_PATTERN=re.compile(r'\b(\d{2}\.\d{2}\.\d{4})\b')
 
 def content_fingerprint(pages):
     # Every character/number remains part of the fingerprint; only whitespace changes.
-    text=normalized(' '.join(pages))
+    text=' '.join(unicodedata.normalize('NFC',' '.join(pages)).split())
     return hashlib.sha256(text.encode()).hexdigest() if text else None
 
 

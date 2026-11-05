@@ -83,6 +83,11 @@ class EngineTests(unittest.TestCase):
         self.sample('other.txt',SAMPLE.replace('Пациент: ','Пациент:  '));result=self.workspace.import_folder()
         self.assertEqual(result['documents'],1);self.assertEqual(result['duplicates'],1)
 
+    def test_text_fingerprint_preserves_case_sensitive_units(self):
+        self.sample();self.workspace.import_folder()
+        self.sample('changed-units.txt',SAMPLE.replace('мкмоль/л','МКМОЛЬ/Л'))
+        self.assertEqual(self.workspace.import_folder()['documents'],2)
+
     def test_open_excel_prevents_moves(self):
         path=self.sample();lock=self.workspace.root/'~$Исследования.xlsx';lock.write_text('lock')
         with self.assertRaises(RuntimeError):self.workspace.import_folder()
