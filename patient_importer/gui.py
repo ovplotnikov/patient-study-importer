@@ -9,6 +9,7 @@ import sys
 import threading
 import tkinter as tk
 from tkinter import filedialog,messagebox,ttk
+from tkinter import font as tkfont
 import traceback
 
 from .storage import Workspace
@@ -22,19 +23,19 @@ def open_path(path):
 
 class Application:
     def __init__(self):
-        self.root=tk.Tk();self.root.title('Исследования пациентов');self.root.geometry('980x700');self.root.minsize(820,600)
-        self.root.option_add('*Font',('Segoe UI' if os.name=='nt' else 'Helvetica',11))
+        self.root=tk.Tk();self.root.title('Исследования пациентов');self.root.geometry(f"{min(980,self.root.winfo_screenwidth()-60)}x{min(720,self.root.winfo_screenheight()-100)}+20+20");self.root.minsize(820,600)
+        tkfont.nametofont('TkDefaultFont').configure(family='Segoe UI' if os.name=='nt' else 'Helvetica',size=11)
         style=ttk.Style();style.configure('Title.TLabel',font=('Segoe UI',22,'bold'));style.configure('Action.TButton',padding=(20,13));style.configure('TButton',padding=(10,7))
         self.events=queue.Queue();self.worker=None;self.cancel=threading.Event();self.closing=False
         self.settings=Path(os.environ.get('APPDATA',str(Path.home()/'.config')))/'PatientStudyImporter'/'settings.json'
         self.workspace=None
-        frame=ttk.Frame(self.root,padding=25);frame.pack(fill='both',expand=True)
+        frame=ttk.Frame(self.root,padding=20);frame.pack(fill='both',expand=True)
         ttk.Label(frame,text='Исследования пациентов',style='Title.TLabel').pack(anchor='w')
         ttk.Label(frame,text='Добавьте файлы в рабочую папку и нажмите «Обработать».',wraplength=870).pack(anchor='w',pady=(8,22))
         folder=ttk.Frame(frame);folder.pack(fill='x')
         self.folder_var=tk.StringVar();ttk.Entry(folder,textvariable=self.folder_var,state='readonly').pack(side='left',fill='x',expand=True,padx=(0,10))
         self.choose_button=ttk.Button(folder,text='Выбрать папку…',command=self.choose);self.choose_button.pack(side='right')
-        actions=ttk.Frame(frame);actions.pack(fill='x',pady=17)
+        actions=ttk.Frame(frame);actions.pack(fill='x',pady=12)
         self.start_button=ttk.Button(actions,text='Обработать',style='Action.TButton',command=self.start);self.start_button.pack(side='left')
         self.stop_button=ttk.Button(actions,text='Остановить',command=self.stop,state='disabled');self.stop_button.pack(side='left',padx=10)
         ttk.Button(actions,text='Открыть «Входящие»',command=lambda:self.open_folder('Входящие')).pack(side='right')
@@ -47,7 +48,7 @@ class Application:
         self.excel_button=ttk.Button(results,text='Открыть таблицу',command=self.open_workbook);self.excel_button.pack(side='left')
         self.review_button=ttk.Button(results,text='Уточнить пациентов',command=self.review);self.review_button.pack(side='left',padx=10)
         ttk.Button(results,text='Открыть рабочую папку',command=lambda:self.open_folder('')).pack(side='left')
-        ttk.Separator(frame).pack(fill='x',pady=22)
+        ttk.Separator(frame).pack(fill='x',pady=16)
         help_text=('Файлы из корня и папки «Входящие» обрабатываются вместе с подпапками.\n\n'
                    '«Обработано» — данные сохранены. «Нужно уточнить» — выберите пациента в программе. '
                    '«Дубли» — повторные файлы. «Ошибки» — файлы, которые не удалось прочитать.\n\n'
@@ -143,7 +144,7 @@ class Application:
 
     def review(self):
         if not self.workspace:return
-        ReviewWindow(self.root,self.workspace,self.refresh)
+        self.review_window=ReviewWindow(self.root,self.workspace,self.refresh)
 
     def close(self):
         if self.worker and self.worker.is_alive():
@@ -157,20 +158,23 @@ class Application:
 class ReviewWindow:
     def __init__(self,parent,workspace,on_change):
         self.workspace=workspace;self.on_change=on_change;self.selected=None
-        self.window=tk.Toplevel(parent);self.window.title('Уточнить пациентов');self.window.geometry('1100x760');self.window.transient(parent)
+        self.window=tk.Toplevel(parent);self.window.title('Уточнить пациентов');self.window.geometry(f"{min(1100,parent.winfo_screenwidth()-60)}x{min(760,parent.winfo_screenheight()-100)}+20+20");self.window.transient(parent);self.window.grab_set()
         outer=ttk.Frame(self.window,padding=18);outer.pack(fill='both',expand=True)
         ttk.Label(outer,text='Проверьте оригинал и подтвердите, кому принадлежит документ.',wraplength=1000).pack(anchor='w',pady=(0,12))
-        self.list=ttk.Treeview(outer,columns=('file','reason'),show='headings',height=8)
+        list_frame=ttk.Frame(outer);list_frame.pack(fill='x')
+        self.list=ttk.Treeview(list_frame,columns=('file','reason'),show='headings',height=8)
         self.list.heading('file',text='Документ');self.list.heading('reason',text='Причина')
-        self.list.column('file',width=360);self.list.column('reason',width=650);self.list.pack(fill='x')
+        self.list.column('file',width=300);self.list.column('reason',width=540);self.list.pack(side='left',fill='x',expand=True)
+        scroll=ttk.Scrollbar(list_frame,orient='vertical',command=self.list.yview);scroll.pack(side='right',fill='y');self.list.configure(yscrollcommand=scroll.set)
         self.list.bind('<<TreeviewSelect>>',self.load)
         fields=ttk.Frame(outer);fields.pack(fill='x',pady=14)
         ttk.Label(fields,text='ФИО полностью').grid(row=0,column=0,sticky='w')
         ttk.Label(fields,text='Дата рождения · ДД.ММ.ГГГГ').grid(row=0,column=1,sticky='w',padx=10)
         self.name=tk.StringVar();self.birth=tk.StringVar()
-        ttk.Entry(fields,textvariable=self.name,width=56).grid(row=1,column=0,sticky='ew')
-        ttk.Entry(fields,textvariable=self.birth,width=25).grid(row=1,column=1,padx=10)
-        ttk.Button(fields,text='Подтвердить пациента',command=self.confirm).grid(row=1,column=2)
+        fields.columnconfigure(0,weight=1)
+        ttk.Entry(fields,textvariable=self.name,width=43).grid(row=1,column=0,sticky='ew')
+        ttk.Entry(fields,textvariable=self.birth,width=21).grid(row=1,column=1,padx=10)
+        self.confirm_button=ttk.Button(fields,text='Подтвердить пациента',command=self.confirm);self.confirm_button.grid(row=1,column=2)
         candidate_row=ttk.Frame(outer);candidate_row.pack(fill='x')
         ttk.Label(candidate_row,text='Возможное совпадение').pack(side='left')
         self.candidates=ttk.Combobox(candidate_row,state='readonly',width=75);self.candidates.pack(side='left',padx=10)

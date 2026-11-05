@@ -38,6 +38,7 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "Packaged GUI failed with exit $($p.ExitCode)" }
           Copy-Item (Join-Path $testRoot 'ui-test.json') dist/ui-test.json
           if (Test-Path (Join-Path $testRoot 'ui.png')) { Copy-Item (Join-Path $testRoot 'ui.png') dist/ui.png }
+          if (Test-Path (Join-Path $testRoot 'review-ui.png')) { Copy-Item (Join-Path $testRoot 'review-ui.png') dist/review-ui.png }
           Get-FileHash $exe.FullName -Algorithm SHA256 | Format-List | Out-File dist/SHA256.txt
       - uses: actions/upload-artifact@v4
         with:

@@ -22,7 +22,7 @@ for language in ['rus','eng']:
 subprocess.run([sys.executable,'-m','PyInstaller','--noconfirm','--clean','--onefile','--windowed',
                 '--name','Исследования пациентов','--add-data',str(root/'vendor')+';vendor',
                 '--collect-all','pypdfium2','--collect-all','pypdfium2_raw',str(root/'app.py')],cwd=root,check=True)
-shutil.copy2(root/'README.md',root/'dist'/'Инструкция.txt')
+(root/'dist'/'Инструкция.txt').write_text((root/'README.md').read_text(encoding='utf-8').split('## Проверка и сборка')[0],encoding='utf-8-sig')
 license_root=root/'dist'/'Лицензии';license_root.mkdir(exist_ok=True)
 packages=['pypdf','openpyxl','python-docx','Pillow','pypdfium2','portalocker','lxml','et-xmlfile','typing_extensions']
 versions={}

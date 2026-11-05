@@ -38,8 +38,24 @@ def main():
             x,y=application.root.winfo_rootx(),application.root.winfo_rooty()
             ImageGrab.grab(bbox=(x,y,x+application.root.winfo_width(),y+application.root.winfo_height())).save(args.ui_smoke_test/'ui.png')
         except Exception:pass
+        (application.workspace.root/'Входящие'/'без ФИО.txt').write_text('Дата рождения: 01.01.2000\nЗаключение: тестовый текст.',encoding='utf-8')
+        application.start_button.invoke()
+        deadline=time.monotonic()+30
+        while application.worker.is_alive() or not application.events.empty():
+            application.root.update();time.sleep(.05)
+            assert time.monotonic()<deadline,'Second GUI import timed out'
+        application.review_button.invoke();application.root.update()
+        review=application.review_window
+        assert review.selected
+        try:
+            x,y=review.window.winfo_rootx(),review.window.winfo_rooty()
+            ImageGrab.grab(bbox=(x,y,x+review.window.winfo_width(),y+review.window.winfo_height())).save(args.ui_smoke_test/'review-ui.png')
+        except Exception:pass
+        review.name.set('ТЕСТОВ ТЕСТ ТЕСТОВИЧ');review.birth.set('01.01.2000');review.confirm_button.invoke();application.root.update()
+        assert application.workspace.summary()['review']==0
+        review.window.destroy()
         application.root.destroy()
-        (args.ui_smoke_test/'ui-test.json').write_text(json.dumps({'ok':True,'checks':['window_creation','folder_selection','process_button','background_import','completion_state']}),encoding='utf-8')
+        (args.ui_smoke_test/'ui-test.json').write_text(json.dumps({'ok':True,'checks':['window_creation','folder_selection','process_button','background_import','completion_state','review_window','confirmation_button']}),encoding='utf-8')
         return
     if args.self_test:
         from patient_importer.smoke import smoke_test
