@@ -128,6 +128,15 @@ class EngineTests(unittest.TestCase):
         result=self.workspace.import_folder()
         self.assertEqual(result['patients'],2);self.assertEqual(result['review'],0)
 
+    def test_nested_existing_workspace_is_not_consumed(self):
+        nested=Workspace(self.workspace.root/'Данные')
+        path=nested.root/'Входящие'/'study.txt';path.write_text(SAMPLE,encoding='utf-8')
+        nested.import_folder()
+        another=nested.root/'Входящие'/'new.txt';another.write_text(SAMPLE,encoding='utf-8')
+        result=self.workspace.import_folder()
+        self.assertEqual(result['documents'],0)
+        self.assertTrue(another.exists());self.assertTrue((nested.root/'Обработано'/'study.txt').exists())
+
     def test_anatomical_measurements_and_recommendations(self):
         text='Дата выполнения услуги: 02.03.2025\nРазмеры почек: правая 88,5*32 мм, левая 52,3*17,8 мм.\nТолщина паренхимы: справа 13 мм, слева 6,4-3,6-5,6 мм.\nРекомендации:\nПить до 1500 мл.'
         result=analysis.analyze({'pages':[text],'ocr_pages':[]},'УЗИ.txt')

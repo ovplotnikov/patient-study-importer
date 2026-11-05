@@ -103,7 +103,7 @@ class Workspace:
     def files(self):
         paths=[];skipped=[]
         for parent,dirs,files in os.walk(self.root,followlinks=False):
-            dirs[:]=[d for d in dirs if not d.startswith('.') and not (Path(parent)==self.root and d in MANAGED) and not (Path(parent)/d).is_symlink()]
+            dirs[:]=[d for d in dirs if not d.startswith('.') and d not in MANAGED and not (Path(parent)/d).is_symlink() and not (Path(parent)/d/'База'/'registry.sqlite').exists()]
             for name in files:
                 path=Path(parent)/name
                 if name.startswith(('.','~$')) or path.is_symlink():continue
@@ -254,6 +254,7 @@ class Workspace:
             self.backup(db)
             # Path metadata in the workbook describes the durable planned destinations.
             result=self.summary(db)
+            result['skipped_files']=len(skipped)
             progress(phase='Остановлено' if cancel.is_set() else 'Готово',summary=result)
             return result
 

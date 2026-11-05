@@ -121,6 +121,7 @@ class Application:
                 elif kind=='finished':
                     self.busy(False);self.refresh();self.current.set('')
                     self.phase.set(('Остановлено. ' if self.cancel.is_set() else 'Готово. ')+f"В таблице {data['documents']} документов. Уточнить пациента — {data['review']}.")
+                    if data.get('skipped_files'):self.phase.set(self.phase.get()+f" Файлов других форматов пропущено — {data['skipped_files']}.")
                     if data['pending_moves']:messagebox.showwarning('Файлы сохранены',f"Осталось переместить файлов — {data['pending_moves']}. Закройте открытые документы и нажмите «Обработать» ещё раз.",parent=self.root)
                     if self.closing:self.root.destroy();return
                 elif kind=='error':
