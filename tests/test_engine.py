@@ -62,6 +62,12 @@ class EngineTests(unittest.TestCase):
         files=list((self.workspace.root/'Обработано').glob('*.txt'))
         self.assertEqual(len(files),2);self.assertEqual(len({sha256(p) for p in files}),2)
 
+    def test_identical_file_returned_to_same_path_goes_to_duplicates(self):
+        self.sample();self.workspace.import_folder()
+        self.sample();result=self.workspace.import_folder()
+        self.assertEqual(result['documents'],1);self.assertEqual(result['duplicates'],1)
+        self.assertTrue((self.workspace.root/'Дубли'/'test.txt').exists())
+
     def test_text_fingerprint_catches_whitespace_changes(self):
         self.sample();self.workspace.import_folder()
         self.sample('other.txt',SAMPLE.replace('Пациент: ','Пациент:  '));result=self.workspace.import_folder()

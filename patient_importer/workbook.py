@@ -64,7 +64,8 @@ def rows_for(workspace,db):
                 rows['Тексты'].append([stable_id(sid,'page',page,part),sid,page,part,text[start:start+30000]])
         for arrival in db.execute('SELECT * FROM arrivals WHERE document_id=? ORDER BY id',(sid,)):
             destination=arrival['destination'] or str(workspace.destination(arrival))
-            rows['Источники'].append([str(arrival['id']),sid,arrival['hash'],Path(arrival['source']).name,destination,document['original'],arrival['category'],arrival['created']])
+            preserved=next(workspace.originals.glob(arrival['hash']+'.*'),Path(document['original']))
+            rows['Источники'].append([str(arrival['id']),sid,arrival['hash'],Path(arrival['source']).name,destination,str(preserved),arrival['category'],arrival['created']])
     for row in db.execute("SELECT * FROM arrivals WHERE category='Ошибки' OR error!=''"):
         rows['Проверка'].append([stable_id('arrival',row['id']),row['document_id'],Path(row['source']).name,'Ошибка файла',row['error']])
     return rows
@@ -159,7 +160,7 @@ def export_workbook(workspace,db):
     fd,temporary=tempfile.mkstemp(suffix='.xlsx',prefix='.import-',dir=workspace.root);os.close(fd)
     try:
         book.save(temporary)
-        with open(temporary,'rb') as handle:os.fsync(handle.fileno())
+        with open(temporary,'r+b') as handle:os.fsync(handle.fileno())
         if target.exists():
             backup=workspace.root/'Резервные копии'/('Исследования_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f')+'.xlsx')
             shutil.copy2(target,backup)

@@ -138,8 +138,9 @@ class Workspace:
         digest=sha256(path)
         previous=db.execute('SELECT * FROM arrivals WHERE source=? AND hash=?',(str(path),digest)).fetchone()
         if previous and previous['document_id']:
-            # A copy placed back at the same path is still the same arrival.
-            db.execute("UPDATE arrivals SET status='pending',error='' WHERE id=?",(previous['id'],))
+            if previous['status']=='done':
+                db.execute("UPDATE arrivals SET status='pending',category='Дубли',destination=NULL,error='' WHERE id=?",(previous['id'],))
+            else:db.execute("UPDATE arrivals SET error='' WHERE id=?",(previous['id'],))
             return 'Повтор',previous['document_id']
         match=db.execute('SELECT id FROM documents WHERE hash=?',(digest,)).fetchone()
         duplicate=bool(match)
@@ -162,7 +163,7 @@ class Workspace:
                 db.execute('INSERT INTO documents(id,hash,fingerprint,filename,folder,original,extracted,analysis,created) VALUES (?,?,?,?,?,?,?,?,?)',
                            (document_id,digest,fingerprint,path.name,str(path.parent.relative_to(self.root)),str(original),json.dumps(extracted,ensure_ascii=False),json.dumps(parsed,ensure_ascii=False),now()))
         category='Дубли' if duplicate else 'Обработано'
-        db.execute('INSERT INTO arrivals(source,hash,document_id,category,created) VALUES (?,?,?,?,?) ON CONFLICT(source,hash) DO UPDATE SET document_id=excluded.document_id,category=excluded.category,status=\'pending\',error=\'\'',
+        db.execute('INSERT INTO arrivals(source,hash,document_id,category,created) VALUES (?,?,?,?,?) ON CONFLICT(source,hash) DO UPDATE SET document_id=excluded.document_id,category=excluded.category,destination=NULL,status=\'pending\',error=\'\'',
                    (str(path),digest,document_id,category,now()))
         self.touch(db)
         return 'Повтор' if duplicate else 'Добавлен',document_id
@@ -262,7 +263,9 @@ class Workspace:
         target=folder/('База_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f')+'.sqlite')
         temporary=target.with_suffix('.part')
         try:
-            with sqlite3.connect(temporary) as snapshot:db.backup(snapshot)
+            snapshot=sqlite3.connect(temporary)
+            try:db.backup(snapshot)
+            finally:snapshot.close()
             os.replace(temporary,target)
         finally:temporary.unlink(missing_ok=True)
         for old in sorted(folder.glob('База_*.sqlite'))[:-20]:old.unlink()
