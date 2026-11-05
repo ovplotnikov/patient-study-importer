@@ -142,6 +142,7 @@ def export_workbook(workspace,db):
     if 'Обзор' in book:book.remove(book['Обзор'])
     summary=book.create_sheet('Обзор',0)
     summary.append(['Исследования пациентов'])
+    summary.merge_cells('A1:B1')
     summary['A1'].font=Font(name='Calibri',size=18,bold=True,color='244C65')
     summary.append(['Обновлено',datetime.now()]);summary['B2'].number_format='dd.mm.yyyy hh:mm'
     metrics=workspace.summary(db)
