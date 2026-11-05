@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+build/
+dist/
+vendor/
+*.spec
+.DS_Store
+*.sqlite*
+*.xlsx
+*.pdf
+*.docx
+*.traineddata
+local-*
