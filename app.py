@@ -20,6 +20,13 @@ def main():
         application=Application()
         application.select(args.ui_smoke_test/'gui-workspace')
         application.root.update()
+        from tkinter import ttk
+        def verify_buttons(widget,window):
+            if isinstance(widget,ttk.Button):
+                assert widget.winfo_ismapped() and widget.winfo_height()>=widget.winfo_reqheight(),widget.cget('text')
+                assert widget.winfo_rooty()+widget.winfo_height()<=window.winfo_rooty()+window.winfo_height(),widget.cget('text')
+            for child in widget.winfo_children():verify_buttons(child,window)
+        verify_buttons(application.root,application.root)
         assert application.root.winfo_exists()
         assert str(application.start_button['state'])=='normal'
         from patient_importer.smoke import SAMPLE
@@ -46,6 +53,7 @@ def main():
             assert time.monotonic()<deadline,'Second GUI import timed out'
         application.review_button.invoke();application.root.update()
         review=application.review_window
+        verify_buttons(review.window,review.window)
         assert review.selected
         try:
             x,y=review.window.winfo_rootx(),review.window.winfo_rooty()
@@ -55,7 +63,7 @@ def main():
         assert application.workspace.summary()['review']==0
         review.window.destroy()
         application.root.destroy()
-        (args.ui_smoke_test/'ui-test.json').write_text(json.dumps({'ok':True,'checks':['window_creation','folder_selection','process_button','background_import','completion_state','review_window','confirmation_button']}),encoding='utf-8')
+        (args.ui_smoke_test/'ui-test.json').write_text(json.dumps({'ok':True,'checks':['window_creation','folder_selection','process_button','background_import','completion_state','review_window','confirmation_button','buttons_fully_visible']}),encoding='utf-8')
         return
     if args.self_test:
         from patient_importer.smoke import smoke_test

@@ -49,10 +49,10 @@ class Application:
         self.review_button=ttk.Button(results,text='Уточнить пациентов',command=self.review);self.review_button.pack(side='left',padx=10)
         ttk.Button(results,text='Открыть рабочую папку',command=lambda:self.open_folder('')).pack(side='left')
         ttk.Separator(frame).pack(fill='x',pady=16)
-        help_text=('Файлы из корня и папки «Входящие» обрабатываются вместе с подпапками.\n\n'
-                   '«Обработано» — данные сохранены. «Нужно уточнить» — выберите пациента в программе. '
-                   '«Дубли» — повторные файлы. «Ошибки» — файлы, которые не удалось прочитать.\n\n'
-                   'Новые исследования добавляются в ту же таблицу. Колонка «Заметки», ваши дополнительные колонки и отдельные листы сохраняются.')
+        help_text=('Файлы из корня и «Входящих» обрабатываются вместе с подпапками.\n'
+                   '«Обработано» — сохранено. «Нужно уточнить» — выберите пациента в программе.\n'
+                   '«Дубли» — повторы. «Ошибки» — файлы, которые не удалось прочитать.\n'
+                   'Новые данные добавляются в ту же таблицу. Ваши заметки, колонки и листы сохраняются.')
         ttk.Label(frame,text=help_text,wraplength=870,justify='left').pack(anchor='w')
         bottom=ttk.Frame(frame);bottom.pack(side='bottom',fill='x',pady=(15,0))
         ttk.Button(bottom,text='Сведения и журнал',command=self.details).pack(side='left')
