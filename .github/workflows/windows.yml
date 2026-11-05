@@ -37,9 +37,15 @@ jobs:
           if (-not $p.WaitForExit(60000)) { $p.Kill(); throw 'Packaged GUI timed out' }
           if ($p.ExitCode -ne 0) { throw "Packaged GUI failed with exit $($p.ExitCode)" }
           Copy-Item (Join-Path $testRoot 'ui-test.json') dist/ui-test.json
+          if (Test-Path (Join-Path $testRoot 'ui.png')) { Copy-Item (Join-Path $testRoot 'ui.png') dist/ui.png }
           Get-FileHash $exe.FullName -Algorithm SHA256 | Format-List | Out-File dist/SHA256.txt
       - uses: actions/upload-artifact@v4
         with:
           name: patient-study-importer-windows
           path: dist/
           retention-days: 30
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: windows-test-diagnostics
+          path: ${{ runner.temp }}/patient-app-test/

@@ -85,7 +85,7 @@ def write_sheet(book,name,headers,rows,index):
     sheet=book.create_sheet(name,index)
     sheet.append(headers+custom_headers)
     date_columns=[i for i,h in enumerate(headers) if h in {'Дата рождения','Дата документа','Дата показателя'}]
-    for row in rows:
+    for row_no,row in enumerate(rows,2):
         clean=[safe(value) for value in row]
         for column in date_columns:
             if clean[column]:clean[column]=datetime.strptime(clean[column],'%Y-%m-%d')
@@ -93,7 +93,7 @@ def write_sheet(book,name,headers,rows,index):
         sheet.append(clean)
         # Imported text must not become executable spreadsheet formulas.
         for column,value in enumerate(row,1):
-            if isinstance(value,str) and column-1 not in date_columns:sheet.cell(sheet.max_row,column).data_type='s'
+            if isinstance(value,str) and column-1 not in date_columns:sheet.cell(row_no,column).data_type='s'
     sheet.freeze_panes='D2' if name=='Показатели' else 'B2'
     sheet.sheet_view.showGridLines=False
     for cell in sheet[1]:

@@ -61,7 +61,7 @@ class Application:
         if getattr(sys,'frozen',False) and portable.is_dir():default=portable
         if self.settings.exists():
             try:
-                saved=Path(json.loads(self.settings.read_text())['workspace'])
+                saved=Path(json.loads(self.settings.read_text(encoding='utf-8'))['workspace'])
                 if saved.is_dir():default=saved
             except (OSError,ValueError,KeyError):pass
         self.select(default)
@@ -72,7 +72,7 @@ class Application:
         try:
             self.workspace=Workspace(path);self.folder_var.set(str(self.workspace.root))
             self.settings.parent.mkdir(parents=True,exist_ok=True)
-            temporary=self.settings.with_suffix('.tmp');temporary.write_text(json.dumps({'workspace':str(self.workspace.root)},ensure_ascii=False));temporary.replace(self.settings)
+            temporary=self.settings.with_suffix('.tmp');temporary.write_text(json.dumps({'workspace':str(self.workspace.root)},ensure_ascii=False),encoding='utf-8');temporary.replace(self.settings)
             self.refresh()
         except Exception as exc:messagebox.showerror('Не удалось открыть папку',str(exc),parent=self.root)
 

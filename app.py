@@ -13,15 +13,33 @@ def main():
     args=parser.parse_args()
     if args.ui_smoke_test:
         args.ui_smoke_test.mkdir(parents=True,exist_ok=True)
+        from tkinter import messagebox
+        def fail_dialog(title,message,**kwargs):raise RuntimeError(title+': '+message)
+        messagebox.showerror=fail_dialog
         from patient_importer.gui import Application
         application=Application()
         application.select(args.ui_smoke_test/'gui-workspace')
         application.root.update()
         assert application.root.winfo_exists()
         assert str(application.start_button['state'])=='normal'
-        application.root.after(500,application.root.destroy)
-        application.run()
-        (args.ui_smoke_test/'ui-test.json').write_text(json.dumps({'ok':True,'window':'Исследования пациентов'}),encoding='utf-8')
+        from patient_importer.smoke import SAMPLE
+        import time
+        (application.workspace.root/'Входящие'/'gui-test.txt').write_text(SAMPLE,encoding='utf-8')
+        application.start_button.invoke()
+        deadline=time.monotonic()+30
+        while application.worker.is_alive() or not application.events.empty():
+            application.root.update();time.sleep(.05)
+            assert time.monotonic()<deadline,'GUI import timed out'
+        assert application.workspace.summary()['documents']==1
+        assert 'Готово' in application.phase.get(),application.phase.get()
+        try:
+            from PIL import ImageGrab
+            application.root.update()
+            x,y=application.root.winfo_rootx(),application.root.winfo_rooty()
+            ImageGrab.grab(bbox=(x,y,x+application.root.winfo_width(),y+application.root.winfo_height())).save(args.ui_smoke_test/'ui.png')
+        except Exception:pass
+        application.root.destroy()
+        (args.ui_smoke_test/'ui-test.json').write_text(json.dumps({'ok':True,'checks':['window_creation','folder_selection','process_button','background_import','completion_state']}),encoding='utf-8')
         return
     if args.self_test:
         from patient_importer.smoke import smoke_test
@@ -39,7 +57,13 @@ def main():
 if __name__=='__main__':
     try:main()
     except Exception as exc:
-        if len(sys.argv)>1:raise
+        if len(sys.argv)>1:
+            if getattr(sys,'frozen',False):
+                import traceback
+                target=Path(sys.argv[-1]);target.mkdir(parents=True,exist_ok=True)
+                (target/'failure.txt').write_text(traceback.format_exc(),encoding='utf-8')
+                raise SystemExit(1)
+            raise
         import tkinter as tk
         from tkinter import messagebox
         root=tk.Tk();root.withdraw();messagebox.showerror('Исследования пациентов',str(exc));root.destroy()
