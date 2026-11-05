@@ -9,7 +9,7 @@ from unittest.mock import patch
 from openpyxl import load_workbook
 
 from patient_importer import analysis,extraction
-from patient_importer.smoke import SAMPLE,smoke_test
+from patient_importer.smoke import SAMPLE,smoke_test,make_mixed_pdf
 from patient_importer.storage import Workspace,sha256
 
 ORIGINAL_EXTRACT=extraction.extract
@@ -32,7 +32,7 @@ class EngineTests(unittest.TestCase):
 
     @staticmethod
     def extract_with_test_image(path):
-        if path.name in {'ocr-test.png','ocr-test.pdf'}:return {'pages':['TEST 12345 01.01.2000'],'ocr_pages':[1],'format':'image'}
+        if path.name in {'ocr-test.png','ocr-test.pdf','ocr-mixed.pdf'}:return {'pages':['TEST 12345 01.01.2000'],'ocr_pages':[1],'format':'image'}
         return ORIGINAL_EXTRACT(path)
 
     def test_export_failure_keeps_source_and_retry_deduplicates(self):
@@ -67,6 +67,16 @@ class EngineTests(unittest.TestCase):
         self.sample();result=self.workspace.import_folder()
         self.assertEqual(result['documents'],1);self.assertEqual(result['duplicates'],1)
         self.assertTrue((self.workspace.root/'Дубли'/'test.txt').exists())
+
+    def test_embedded_images_in_text_pdf_are_not_skipped(self):
+        from PIL import Image
+        source=self.root/'image.pdf';target=self.root/'mixed.pdf'
+        Image.new('RGB',(700,300),'white').save(source,'PDF');make_mixed_pdf(source,target)
+        with patch('patient_importer.extraction.recognize_embedded',return_value='Креатинин 71.5 мкмоль/л'):
+            result=extraction.extract(target)
+        self.assertIn('71.5',result['pages'][1]);self.assertEqual(result['ocr_pages'],[2])
+        self.assertEqual(result['page_numbers'],[1,1])
+        self.assertNotIn('71.5',result['native_pages'][0])
 
     def test_text_fingerprint_catches_whitespace_changes(self):
         self.sample();self.workspace.import_folder()

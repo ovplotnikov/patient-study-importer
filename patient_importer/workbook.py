@@ -61,11 +61,14 @@ def rows_for(workspace,db):
             rows['Проверка'].append([stable_id(sid,'date'),sid,document['filename'],'Дата документа','В бланке не найдена однозначная дата исследования или посещения'])
         for page,text in enumerate(a['pages'],1):
             for part,start in enumerate(range(0,max(1,len(text)),30000),1):
-                rows['Тексты'].append([stable_id(sid,'page',page,part),sid,page,part,text[start:start+30000]])
+                source_page=a.get('page_numbers',list(range(1,len(a['pages'])+1)))[page-1]
+                rows['Тексты'].append([stable_id(sid,'page',page,part),sid,source_page,part,text[start:start+30000]])
         for arrival in db.execute('SELECT * FROM arrivals WHERE document_id=? ORDER BY id',(sid,)):
             destination=arrival['destination'] or str(workspace.destination(arrival))
             preserved=next(workspace.originals.glob(arrival['hash']+'.*'),Path(document['original']))
-            rows['Источники'].append([str(arrival['id']),sid,arrival['hash'],Path(arrival['source']).name,destination,str(preserved),arrival['category'],arrival['created']])
+            archive_path=Path(destination).relative_to(workspace.root).as_posix()
+            original_path=preserved.relative_to(workspace.root).as_posix()
+            rows['Источники'].append([str(arrival['id']),sid,arrival['hash'],Path(arrival['source']).name,archive_path,original_path,arrival['category'],arrival['created']])
     for row in db.execute("SELECT * FROM arrivals WHERE category='Ошибки' OR error!=''"):
         rows['Проверка'].append([stable_id('arrival',row['id']),row['document_id'],Path(row['source']).name,'Ошибка файла',row['error']])
     return rows
@@ -120,7 +123,7 @@ def write_sheet(book,name,headers,rows,index):
     if name=='Источники':
         for row in sheet.iter_rows(min_row=2):
             for column in [4,5]:
-                row[column].hyperlink=Path(row[column].value).as_uri()
+                row[column].hyperlink=row[column].value
                 row[column].style='Hyperlink'
 
 

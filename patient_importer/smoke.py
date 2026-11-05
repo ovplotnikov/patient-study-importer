@@ -17,6 +17,16 @@ SAMPLE='''Пациент: ТЕСТОВ ТЕСТ ТЕСТОВИЧ
 '''
 
 
+def make_mixed_pdf(source,target):
+    from pypdf import PdfReader,PdfWriter
+    from pypdf.generic import DictionaryObject,NameObject,DecodedStreamObject
+    writer=PdfWriter(clone_from=source);page=writer.pages[0]
+    page['/Resources'][NameObject('/Font')]=DictionaryObject({NameObject('/F1'):DictionaryObject({NameObject('/Type'):NameObject('/Font'),NameObject('/Subtype'):NameObject('/Type1'),NameObject('/BaseFont'):NameObject('/Helvetica')})})
+    stream=DecodedStreamObject();stream.set_data(page.get_contents().get_data()+b'\nBT /F1 12 Tf 20 10 Td (Synthetic cover text with embedded test image) Tj ET')
+    page.replace_contents(stream)
+    writer.write(target)
+
+
 def smoke_test(root):
     root=Path(root);root.mkdir(parents=True,exist_ok=True)
     workspace=Workspace(root/'Набор с пробелами и кириллицей')
@@ -57,4 +67,7 @@ def smoke_test(root):
     pdf_path=root/'ocr-test.pdf';image.save(pdf_path,'PDF')
     recognized=' '.join(extract(pdf_path)['pages'])
     assert '12345' in recognized and '2000' in recognized,recognized
-    return {'ok':True,'checks':['first_import','archive_move','byte_duplicate','incremental_patient','notes_preserved','custom_sheet_preserved','review_confirmation','review_move','bundled_ocr','bundled_pdf_rendering'],'summary':workspace.summary()}
+    mixed_path=root/'ocr-mixed.pdf';make_mixed_pdf(pdf_path,mixed_path)
+    mixed=extract(mixed_path)
+    assert '12345' in ' '.join(mixed['pages']) and mixed['ocr_pages'],mixed
+    return {'ok':True,'checks':['first_import','archive_move','byte_duplicate','incremental_patient','notes_preserved','custom_sheet_preserved','review_confirmation','review_move','bundled_ocr','bundled_pdf_rendering','mixed_pdf_ocr'],'summary':workspace.summary()}

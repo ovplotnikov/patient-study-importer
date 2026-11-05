@@ -55,7 +55,8 @@ def narrative(pages, day, ocr_pages):
         # Laboratory fields are already extracted by the layout parser.
         if 'Показатель' in page and 'Результат' in page:
             continue
-        section='Описание исследования';context_date=day;date_source='Дата документа';context=''
+        page_day=document_date(page) or day
+        section='Описание исследования';context_date=page_day;date_source='Дата документа';context=''
         lines=page.splitlines();section_lines=[];section_start=1
         def flush():
             text='\n'.join(section_lines).strip()
@@ -66,7 +67,7 @@ def narrative(pages, day, ocr_pages):
             marker=SECTIONS.match(clean)
             if marker:
                 flush();section_lines=[];section_start=index;section=marker[1]
-                context='';context_date=day;date_source='Дата документа'
+                context='';context_date=page_day;date_source='Дата документа'
                 if re.search('анамнез',section,re.I):context_date=None;date_source='Дата в анамнезе не указана'
             section_lines.append(line)
             if re.search(r'рекомендац|назначен|лечени',section,re.I):continue
@@ -106,18 +107,21 @@ def narrative(pages, day, ocr_pages):
 def analyze(extracted, filename):
     pages=extracted['pages'];ocr_pages=extracted['ocr_pages']
     names,births,cards=identity(pages)
-    native_names,native_births,_=identity([text for i,text in enumerate(pages,1) if i not in ocr_pages])
+    native_names,native_births,_=identity(extracted.get('native_pages',[text for i,text in enumerate(pages,1) if i not in ocr_pages]))
     day=document_date('\n'.join(pages))
     laboratory,pending=laboratory_rows(pages)
     for row in laboratory:
-        row.update(side='',date=day,date_source='Дата документа',origin='Лабораторный бланк',status='Проверить' if row['page'] in ocr_pages else 'Извлечено')
+        row_day=document_date(pages[row['page']-1]) or day
+        row.update(side='',date=row_day,date_source='Дата страницы' if row_day!=day else 'Дата документа',origin='Лабораторный бланк',status='Проверить' if row['page'] in ocr_pages else 'Извлечено')
     descriptive,sections=narrative(pages,day,ocr_pages)
     problems=[]
     if not any(text.strip() for text in pages):problems.append('В документе не обнаружен читаемый текст')
     for page,line,text in pending:
         if re.match(r'^(Общий|Исследование мочи методом|Анализ крови биохимический)',text,re.I):continue
         problems.append(f'Страница {page}, строка {line}: проверить строку таблицы — {text}')
-    return {'version':PARSER_VERSION,'names':names,'births':births,'cards':cards,'date':day,
+    page_numbers=extracted.get('page_numbers',list(range(1,len(pages)+1)))
+    for item in laboratory+descriptive+sections:item['page']=page_numbers[item['page']-1]
+    return {'version':PARSER_VERSION,'names':names,'births':births,'cards':cards,'date':day,'page_numbers':page_numbers,
             'type':study_type('\n'.join(pages),filename),'observations':laboratory+descriptive,'sections':sections,
             'problems':problems,'identity_from_ocr':names!=native_names or births!=native_births,'pages':pages,'ocr_pages':ocr_pages}
 
@@ -135,6 +139,7 @@ def resolve(analyses, known_patients):
     results={}
     for item in analyses:
         a=item['analysis'];key=None;reason='Недостаточно идентификаторов';candidates=[]
+        if len(a['names'])>1 or len(a['births'])>1:reason='В документе несколько ФИО или дат рождения. Сверьте все страницы с оригиналом'
         if len(a['names'])==1 and len(a['births'])==1:
             options=compact[(a['names'][0].replace(' ',''),a['births'][0])]
             if len(options)==1:
