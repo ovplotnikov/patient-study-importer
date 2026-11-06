@@ -71,14 +71,12 @@ jobs:
         with:
           name: patient-study-importer-windows
           path: dist
-      - name: Package license notices
-        run: |
-          cd dist
-          zip -qr Лицензии.zip Лицензии
+      - name: Package release archive
+        run: python3 packaging/package_release.py dist
       - name: Publish private release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.exe dist/Инструкция.txt dist/SHA256.txt dist/build-info.json dist/Лицензии.zip \
+          gh release create "$GITHUB_REF_NAME" dist/PatientStudyImporter-Windows.zip dist/PatientStudyImporter-Windows.sha256 \
             --repo "$GITHUB_REPOSITORY" --title "Исследования пациентов $GITHUB_REF_NAME" \
             --notes-file packaging/release-notes.md --verify-tag
