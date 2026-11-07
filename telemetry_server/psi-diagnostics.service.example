@@ -1,0 +1,32 @@
+[Unit]
+Description=Patient Study Importer aggregate diagnostic counters
+After=network.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=psi-diagnostics
+StateDirectoryMode=0700
+WorkingDirectory=/opt/patient-study-importer
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -m telemetry_server --database /var/lib/psi-diagnostics/counts.sqlite3 --allow-version 2.4.0
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+StandardOutput=null
+StandardError=null
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target

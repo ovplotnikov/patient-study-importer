@@ -12,7 +12,8 @@ import tkinter as tk
 from tkinter import filedialog,messagebox,ttk
 import traceback
 from .storage import Workspace
-from . import __version__,updater,intake,ui
+from . import __version__,updater,intake,ui,diagnostics_config
+from .telemetry import Diagnostics
 
 
 def open_path(path):
@@ -35,14 +36,17 @@ class Application:
         self.root.geometry(f'{min(1100,self.root.winfo_screenwidth()-50)}x{min(800,self.root.winfo_screenheight()-130)}+20+20')
         self.root.minsize(850,620);ui.setup(self.root);self.icons=ui.Icons(self.root)
         self.events=queue.Queue();self.worker=None;self.cancel=threading.Event();self.closing=False
-        self.updating=False;self.update_cancel=threading.Event();self.pending_update=None
+        self.updating=False;self.update_cancel=threading.Event();self.pending_update=None;self.update_prompt_active=False
         self.working=False;self.screen='documents';self.batch=[];self.paths=[]
         self.workspace=None;self.review_window=None;self.problem_window=None;self.history_window=None
         self.settings=Path(os.environ.get('APPDATA',str(Path.home()/'.config')))/'PatientStudyImporter'/'settings.json'
+        self.diagnostics=Diagnostics(self.settings.parent/'diagnostics',endpoint=diagnostics_config.TELEMETRY_URL)
+        self.diagnostics_window=None;self.support_window=None;self.diagnostics_worker=None
         self.frame=ttk.Frame(self.root,padding=(28,16));self.frame.pack(fill='both',expand=True)
         header=ttk.Frame(self.frame);header.pack(fill='x',pady=(0,12))
         ttk.Label(header,text='Исследования пациентов',font=(ui.FONT,18,'bold')).pack(side='left')
-        ttk.Button(header,text=' Помощь',image=self.icons.get('question-circle'),compound='left',style='Link.TButton',command=self.details).pack(side='right')
+        self.help_button=ttk.Button(header,text=' Помощь',image=self.icons.get('question-circle'),compound='left',style='Link.TButton',command=self.details)
+        self.help_button.pack(side='right')
         self.steps=ttk.Frame(self.frame);self.steps.pack(fill='x',pady=(0,12))
         self.step_labels=[]
         for index,(title,icon) in enumerate([('Документы','file-earmark'),('Обработка','gear'),('Результат','table')]):
@@ -89,6 +93,9 @@ class Application:
         self.root.after(100,self.poll)
         self.root.bind('<FocusIn>',self.focus_refresh)
         if not os.environ.get('PATIENT_IMPORTER_NO_UPDATE_CHECK'):self.root.after(2000,self.auto_update_check)
+        if not os.environ.get('PATIENT_IMPORTER_NO_DIAGNOSTICS_PROMPT'):
+            self.root.after(6000,self.offer_diagnostics)
+        self.root.after(60000,self.diagnostics_tick)
 
     def focus_refresh(self,event):
         if event.widget is self.root and not self.working and self.screen=='documents':
@@ -107,7 +114,7 @@ class Application:
 
     def select(self,path):
         try:
-            workspace=Workspace(path)
+            workspace=Workspace(path,diagnostics=self.diagnostics)
             self.settings.parent.mkdir(parents=True,exist_ok=True)
             temporary=self.settings.with_suffix('.tmp');temporary.write_text(json.dumps({'workspace':str(workspace.root)},ensure_ascii=False),encoding='utf8');temporary.replace(self.settings)
             self.workspace=workspace;self.folder_var.set(str(workspace.root));self.batch=[]
@@ -189,8 +196,13 @@ class Application:
         self.cancel.clear();self.busy(True);self.phase.set('Добавляем файлы…')
         workspace=self.workspace
         def work():
-            try:self.events.put(('staged',intake.stage_files(workspace,paths,lambda name:self.events.put(('staging',name)),self.cancel)))
-            except Exception as exc:self.events.put(('error',str(exc)))
+            try:
+                result=intake.stage_files(workspace,paths,lambda name:self.events.put(('staging',name)),self.cancel)
+                if result['errors']:workspace._diagnostic('failure_stages','intake',len(result['errors']))
+                self.events.put(('staged',result))
+            except Exception as exc:
+                workspace._diagnostic('failure_stages','intake')
+                self.events.put(('error',str(exc)))
         self.worker=threading.Thread(target=work,daemon=False);self.worker.start()
 
     def remove_file(self,path):
@@ -239,6 +251,11 @@ class Application:
         if summary.get('incomplete'):self.row('Сверено с замечаниями',f"Документов: {summary['incomplete']} · Причины сохранены в таблице",self.icons.get('exclamation-triangle','amber',32),self.history,'Посмотреть')
         if summary.get('pending_export'):self.row('Таблица ожидает сохранения','Закройте Excel и повторите сохранение',self.icons.get('exclamation-triangle','amber',32),self.start,'Сохранить')
         if problems:self.row('Не все файлы обработаны','Откройте список, чтобы исправить ошибки',self.icons.get('exclamation-triangle','red',32),self.problems,'Разобрать')
+        from .support import has_serious_issue
+        if summary['errors'] or any(has_serious_issue(issue.get('code') for issue in item['issues'])
+                                   for item in self.workspace.quality_review_list()):
+            self.row('Бланк прочитан не полностью','Можно помочь добавить поддержку этого формата',
+                     self.icons.get('question-circle','muted',32),self.help_with_form,'Как помочь')
         if self.batch:
             ttk.Label(self.content.body,text='Последняя обработка',font=(ui.FONT,13,'bold')).pack(anchor='w',pady=(20,6))
             for item in self.batch:
@@ -284,6 +301,7 @@ class Application:
                     if 'done' in data:self.progress['value']=data['done']
                 elif kind=='finished':
                     self.batch=data.get('batch',[]);self.busy(False);self.show_result()
+                    self.send_diagnostics()
                     if self.cancel.is_set():self.phase.set(self.phase.get()+f" · Остановлено. Осталось: {data.get('remaining',0)}")
                     if data.get('skipped_files'):self.phase.set(self.phase.get()+f" · Других форматов: {data['skipped_files']}")
                     if self.closing:self.root.destroy();return
@@ -319,13 +337,50 @@ class Application:
             except Exception:pass
         threading.Thread(target=check,daemon=True).start()
 
+    def diagnostics_tick(self):
+        if self.closing:return
+        self.send_diagnostics()
+        self.root.after(60000,self.diagnostics_tick)
+
+    def send_diagnostics(self):
+        if not self.diagnostics.enabled or self.closing:return
+        if self.diagnostics_worker and self.diagnostics_worker.is_alive():return
+        self.diagnostics_worker=threading.Thread(target=self.diagnostics.send_if_due,daemon=True)
+        self.diagnostics_worker.start()
+
+    def offer_diagnostics(self):
+        if self.closing or not self.diagnostics.should_prompt():return
+        # Native/Tcl dialogs do not always have a Python Widget wrapper.
+        if (self.working or self.updating or self.update_prompt_active
+                or self.root.tk.call('grab','current')):
+            self.root.after(3000,self.offer_diagnostics);return
+        if self.diagnostics.mark_prompted():self.show_diagnostics(first_run=True)
+
+    def show_diagnostics(self,first_run=False):
+        if self.diagnostics_window and self.diagnostics_window.window.winfo_exists():
+            self.diagnostics_window.window.lift();return
+        from .diagnostics_ui import DiagnosticsWindow
+        self.diagnostics_window=DiagnosticsWindow(
+            self.root,self.diagnostics,diagnostics_config.TELEMETRY_URL,
+            first_run=first_run,on_change=self.send_diagnostics)
+
+    def help_with_form(self):
+        if self.support_window and self.support_window.window.winfo_exists():
+            self.support_window.window.lift();return
+        from .diagnostics_ui import SupportWindow
+        self.support_window=SupportWindow(self.root,diagnostics_config.SUPPORT_EMAIL)
+
     def offer_update(self):
         if self.closing or not self.pending_update:return
-        windows=[getattr(self,name,None) for name in ('review_window','problem_window','history_window')]
+        windows=[getattr(self,name,None) for name in ('review_window','problem_window','history_window','diagnostics_window','support_window')]
         if (self.worker and self.worker.is_alive()) or self.updating or any(w and w.window.winfo_exists() for w in windows):
             self.root.after(2000,self.offer_update);return
         release=self.pending_update;self.pending_update=None
-        if not messagebox.askyesno('Доступно обновление',f'Доступна версия {release.tag.lstrip("v")} (установлена {__version__}).\n\nСкачать, установить и перезапустить программу сейчас?\nИсследования, таблица и выбранная рабочая папка сохранятся.',parent=self.root):return
+        self.update_prompt_active=True
+        try:
+            accepted=messagebox.askyesno('Доступно обновление',f'Доступна версия {release.tag.lstrip("v")} (установлена {__version__}).\n\nСкачать, установить и перезапустить программу сейчас?\nИсследования, таблица и выбранная рабочая папка сохранятся.',parent=self.root)
+        finally:self.update_prompt_active=False
+        if not accepted:return
         self.updating=True;self.update_cancel.clear();self.busy(True)
         self.start_button.pack_forget();self.review_button.pack_forget();self.new_button.pack_forget()
         self.stop_button.config(text='Отменить обновление');self.stop_button.pack(side='right')
@@ -358,7 +413,11 @@ class Application:
 
     def details(self):
         from .help_view import open_help
-        open_help(self.root)
+        menu=tk.Menu(self.root,tearoff=False)
+        menu.add_command(label='Инструкция',command=lambda:open_help(self.root))
+        menu.add_command(label='Диагностика…',command=self.show_diagnostics)
+        menu.add_command(label='Помочь с новым бланком…',command=self.help_with_form)
+        menu.tk_popup(self.help_button.winfo_rootx(),self.help_button.winfo_rooty()+self.help_button.winfo_height())
 
     def review(self):
         if not self.workspace or self.working:return

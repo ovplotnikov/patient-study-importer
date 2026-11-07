@@ -1,0 +1,58 @@
+# Dedicated instance for diagnostics. Replace hostname and certificate paths.
+# Review any other proxy, CDN and hosting logs before opening the endpoint.
+worker_processes 1;
+error_log /dev/null crit;
+events { worker_connections 128; }
+
+http {
+    access_log off;
+    server_tokens off;
+    client_header_timeout 5s;
+    client_body_timeout 5s;
+    send_timeout 5s;
+    keepalive_timeout 5s;
+    client_header_buffer_size 1k;
+    large_client_header_buffers 2 4k;
+    client_max_body_size 8k;
+    client_body_buffer_size 16k;
+    client_body_in_single_buffer on;
+
+    # Keyed on a configured server name, with no per-IP quota or records.
+    limit_req_zone $server_name zone=psi_diagnostics_rate:1m rate=1r/s;
+    limit_conn_zone $server_name zone=psi_diagnostics_conn:1m;
+    limit_req_status 429;
+    limit_conn_status 429;
+
+    server {
+        listen 443 ssl;
+        server_name diagnostics.example.com;
+        ssl_certificate /etc/ssl/psi-diagnostics/fullchain.pem;
+        ssl_certificate_key /etc/ssl/psi-diagnostics/privkey.pem;
+        ssl_protocols TLSv1.2 TLSv1.3;
+
+        location = /v1/counters {
+            if ($request_uri != "/v1/counters") { return 404; }
+            if ($request_method != POST) { return 405; }
+            if ($http_transfer_encoding != "") { return 400; }
+            if ($http_content_encoding != "") { return 400; }
+            if ($http_expect != "") { return 417; }
+            limit_req zone=psi_diagnostics_rate burst=10 nodelay;
+            limit_conn psi_diagnostics_conn 8;
+
+            proxy_pass http://127.0.0.1:8765;
+            proxy_http_version 1.1;
+            proxy_request_buffering on;
+            proxy_pass_request_headers off;
+            proxy_set_header Host localhost;
+            proxy_set_header Connection close;
+            proxy_set_header Content-Type $http_content_type;
+            proxy_set_header Content-Length $content_length;
+            proxy_connect_timeout 2s;
+            proxy_send_timeout 5s;
+            proxy_read_timeout 5s;
+        }
+
+        # The health check is reachable only on the receiver's loopback port.
+        location / { return 404; }
+    }
+}
