@@ -375,10 +375,13 @@ class ReviewWindow:
         outer=ttk.Frame(self.window,padding=22);outer.pack(fill='both',expand=True)
         self.title=ttk.Label(outer,text='Кому принадлежит документ?',style='Heading.TLabel');self.title.pack(anchor='w',pady=(0,12))
         self.window.bind('<Configure>',lambda e:self.title.configure(wraplength=max(500,e.width-44)) if e.widget is self.window else None)
-        self.list=ttk.Treeview(outer,columns=('file','reason'),show='headings',height=3,selectmode='browse')
+        self.list_frame=ttk.Frame(outer);list_frame=self.list_frame;list_frame.pack(fill='x')
+        self.list=ttk.Treeview(list_frame,columns=('file','reason'),show='headings',height=3,selectmode='browse')
         self.list.heading('file',text='Документ');self.list.heading('reason',text='Что проверить')
         self.list.column('file',width=330);self.list.column('reason',width=600)
-        self.list.pack(fill='x');self.list.bind('<<TreeviewSelect>>',self.load)
+        list_scroll=ttk.Scrollbar(list_frame,orient='vertical',command=self.list.yview)
+        self.list.configure(yscrollcommand=list_scroll.set)
+        list_scroll.pack(side='right',fill='y');self.list.pack(side='left',fill='x',expand=True);self.list.bind('<<TreeviewSelect>>',self.load)
         self.panes=ttk.Panedwindow(outer,orient='horizontal');self.panes.pack(fill='both',expand=True,pady=(18,0))
         self.left=ttk.Frame(self.panes);self.right=ttk.Frame(self.panes,padding=(20,0,0,0))
         self.panes.add(self.left,weight=3);self.panes.add(self.right,weight=2)
@@ -400,9 +403,12 @@ class ReviewWindow:
         self.text=tk.Text(self.preview_area,wrap='word',font=(ui.FONT,12),padx=12,pady=12,relief='flat',width=35)
         self.text.configure(yscrollcommand=scroll.set)
         self.text_scroll=scroll
-        self.candidate_area=ui.ScrollArea(self.right)
+        self.confirm_button=ttk.Button(self.right,text='Подтвердить пациента',style='Primary.TButton',command=self.confirm)
+        self.confirm_button.pack(side='bottom',fill='x',pady=(10,0))
+        self.editor_area=ui.ScrollArea(self.right);self.editor_area.pack(fill='both',expand=True)
+        self.candidate_area=ttk.Frame(self.editor_area.body);self.candidate_area.pack(fill='x')
         self.candidates=[]
-        fields=ttk.Frame(self.right);fields.pack(side='bottom',fill='x',pady=12)
+        fields=ttk.Frame(self.editor_area.body);fields.pack(fill='x',pady=12)
         ttk.Label(fields,text='ФИО полностью').pack(anchor='w')
         self.name=tk.StringVar();self.birth=tk.StringVar()
         self.name_entry=ttk.Entry(fields,textvariable=self.name);self.name_entry.pack(fill='x',pady=(6,12))
@@ -410,8 +416,8 @@ class ReviewWindow:
         self.birth_entry=ttk.Entry(fields,textvariable=self.birth);self.birth_entry.pack(fill='x',pady=(6,4))
         ttk.Label(fields,text='ДД.ММ.ГГГГ',style='Muted.TLabel',font=(ui.FONT,10)).pack(anchor='w')
         self.validation=tk.StringVar();ttk.Label(fields,textvariable=self.validation,foreground='#b42318',wraplength=330).pack(anchor='w',pady=6)
-        self.confirm_button=ttk.Button(self.right,text='Подтвердить пациента',style='Primary.TButton',command=self.confirm);self.confirm_button.pack(side='bottom',fill='x',before=fields)
-        self.candidate_area.pack(fill='both',expand=True)
+        for entry in (self.name_entry,self.birth_entry):
+            entry.bind('<FocusIn>',lambda e:self.editor_area.canvas.yview_moveto(1))
         self.success=ttk.Frame(outer,padding=40)
         ttk.Label(self.success,image=self.icons.get('check-circle','green',64)).pack(pady=15)
         ttk.Label(self.success,text='Все документы уточнены',style='Heading.TLabel').pack(pady=8)
@@ -434,7 +440,7 @@ class ReviewWindow:
             self.list.selection_set(next(iter(self.records)));self.load()
             self.title.configure(text=f'Кому принадлежит документ?  Осталось: {len(self.records)}')
         else:
-            self.list.pack_forget();self.panes.pack_forget();self.title.pack_forget();self.success.pack(fill='both',expand=True)
+            self.list_frame.pack_forget();self.panes.pack_forget();self.title.pack_forget();self.success.pack(fill='both',expand=True)
 
     def load(self,event=None):
         selection=self.list.selection()
@@ -445,11 +451,12 @@ class ReviewWindow:
         self.name.set(analysis['names'][0] if len(analysis['names'])==1 else '')
         self.birth.set(datetime.strptime(analysis['births'][0],'%Y-%m-%d').strftime('%d.%m.%Y') if len(analysis['births'])==1 else '')
         self.validation.set('');self.confirm_button.configure(state='normal');self.original_button.configure(state='normal')
-        self.candidate_area.clear();self.candidates=record['candidates']
-        ttk.Label(self.candidate_area.body,text='Возможные совпадения' if self.candidates else 'Введите данные из оригинала',font=(ui.FONT,12,'bold')).pack(anchor='w',pady=(0,10))
+        for child in self.candidate_area.winfo_children():child.destroy()
+        self.editor_area.canvas.yview_moveto(0);self.candidates=record['candidates']
+        ttk.Label(self.candidate_area,text='Возможные совпадения' if self.candidates else 'Введите данные из оригинала',font=(ui.FONT,12,'bold')).pack(anchor='w',pady=(0,10))
         for name,birth in self.candidates:
             day=datetime.strptime(birth,'%Y-%m-%d').strftime('%d.%m.%Y')
-            frame=ttk.Frame(self.candidate_area.body,padding=(0,4));frame.pack(fill='x')
+            frame=ttk.Frame(self.candidate_area,padding=(0,4));frame.pack(fill='x')
             ttk.Button(frame,text='\n'.join(textwrap.wrap(name,24))+'\n'+day,command=lambda n=name,b=birth:self.use_candidate(n,b)).pack(fill='x')
             basis=[]
             if birth in record['births']:basis.append('дата рождения')
@@ -459,6 +466,7 @@ class ReviewWindow:
 
     def use_candidate(self,name,birth):
         self.name.set(name);self.birth.set(datetime.strptime(birth,'%Y-%m-%d').strftime('%d.%m.%Y'));self.validation.set('')
+        self.editor_area.canvas.yview_moveto(1)
 
     def show_preview(self,document,analysis):
         from PIL import Image

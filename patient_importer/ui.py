@@ -63,11 +63,20 @@ class ScrollArea(ttk.Frame):
         self.item=self.canvas.create_window(0,0,anchor='nw',window=self.body)
         self.body.bind('<Configure>',lambda e:self.canvas.configure(scrollregion=self.canvas.bbox('all')))
         self.canvas.bind('<Configure>',lambda e:self.canvas.itemconfigure(self.item,width=e.width))
-        self.canvas.bind('<Enter>',self._bind_wheel)
-        self.canvas.bind('<Leave>',lambda e:self.canvas.unbind_all('<MouseWheel>'))
-        self.bind('<Destroy>',lambda e:self.canvas.unbind_all('<MouseWheel>') if e.widget is self else None)
-    def _bind_wheel(self,event):
-        self.canvas.bind_all('<MouseWheel>',lambda e:self.canvas.yview_scroll(-1 if e.delta>0 else 1,'units'))
+        self.wheel_window=self.winfo_toplevel()
+        self.wheel_binding=self.wheel_window.bind('<MouseWheel>',self._wheel,add='+')
+        self.bind('<Destroy>',self._destroy)
+    def _wheel(self,event):
+        widget=self.winfo_containing(event.x_root,event.y_root)
+        while widget is not None:
+            if widget is self:
+                self.canvas.yview_scroll(-1 if event.delta>0 else 1,'units')
+                return 'break'
+            widget=widget.master
+    def _destroy(self,event):
+        if event.widget is self:
+            try:self.wheel_window.unbind('<MouseWheel>',self.wheel_binding)
+            except tk.TclError:pass
     def clear(self):
         for child in self.body.winfo_children():child.destroy()
         self.canvas.yview_moveto(0)

@@ -64,6 +64,12 @@ def run(root):
     capture('01-ready.png')
     app.root.geometry('850x620');settle();visible(app.start_button);visible(app.add_button)
     capture('small-window.png');app.root.geometry(f'{min(1100,app.root.winfo_screenwidth()-50)}x{min(800,app.root.winfo_screenheight()-130)}');settle()
+    # The wheel must scroll when the pointer is over a row label, not just empty canvas.
+    for index in range(15):app.row(f'Учебный файл {index}.txt','TXT')
+    settle();target=app.content.body.winfo_children()[0].winfo_children()[0]
+    target.event_generate('<MouseWheel>',delta=-120,x=5,y=5);settle()
+    assert app.content.canvas.yview()[0]>0,'Wheel over a child label did not scroll'
+    app.show_documents();settle()
     app.start_button.invoke();finish()
     summary=app.workspace.summary();assert summary['documents']==3 and summary['patients']==1 and summary['review']==1,summary
     assert app.screen=='result'
@@ -149,7 +155,12 @@ def run(root):
     app.stage([first,third]);finish();app.start();finish();app.review();settle()
     capture('review-150-percent.png',app.review_window.window)
     visible(app.review_window.confirm_button)
+    candidate=app.review_window.candidate_area.winfo_children()[1].winfo_children()[0]
+    visible(candidate)
+    assert candidate.winfo_rooty()+candidate.winfo_height()<=app.review_window.editor_area.canvas.winfo_rooty()+app.review_window.editor_area.canvas.winfo_height()
+    candidate.invoke();settle();visible(app.review_window.name_entry)
+    capture('review-fields-150-percent.png',app.review_window.window)
     app.review_window.close();app.show_documents();capture('main-150-percent.png')
     app.root.destroy()
-    result={'ok':True,'checks':['empty_state','picker_or_native_drop_callback','external_originals_preserved','same_patient_incremental_import','per_file_results','small_window_buttons','150_percent_layout','visible_candidates','pdf_preview_pages_zoom','confirmation_clears_selection','repeat_confirmation_blocked','consistent_result_state','deduplication','actionable_errors','retry_returns_to_queue','stop_and_resume','automatic_update_offer_decline','embedded_help' if getattr(sys,'frozen',False) else 'source_capture']}
+    result={'ok':True,'checks':['empty_state','picker_or_native_drop_callback','external_originals_preserved','same_patient_incremental_import','per_file_results','small_window_buttons','wheel_over_row','150_percent_layout','visible_candidates','pdf_preview_pages_zoom','confirmation_clears_selection','repeat_confirmation_blocked','consistent_result_state','deduplication','actionable_errors','retry_returns_to_queue','stop_and_resume','automatic_update_offer_decline','embedded_help' if getattr(sys,'frozen',False) else 'source_capture']}
     (root/'ui-test.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf8')
