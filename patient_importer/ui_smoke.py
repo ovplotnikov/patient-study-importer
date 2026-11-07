@@ -63,7 +63,7 @@ def run(root):
     visible(app.start_button);visible(app.add_button)
     capture('01-ready.png')
     app.root.geometry('850x620');settle();visible(app.start_button);visible(app.add_button)
-    capture('small-window.png');app.root.geometry(f'{min(1100,app.root.winfo_screenwidth()-50)}x{min(800,app.root.winfo_screenheight()-80)}');settle()
+    capture('small-window.png');app.root.geometry(f'{min(1100,app.root.winfo_screenwidth()-50)}x{min(800,app.root.winfo_screenheight()-130)}');settle()
     app.start_button.invoke();finish()
     summary=app.workspace.summary();assert summary['documents']==3 and summary['patients']==1 and summary['review']==1,summary
     assert app.screen=='result'
@@ -71,7 +71,7 @@ def run(root):
     app.review();settle();review=app.review_window
     assert review.selected and review.candidates
     review.window.geometry('850x620');settle();visible(review.confirm_button);capture('review-small-window.png',review.window)
-    review.window.geometry(f'{min(1240,app.root.winfo_screenwidth()-50)}x{min(850,app.root.winfo_screenheight()-80)}');settle()
+    review.window.geometry(f'{min(1240,app.root.winfo_screenwidth()-50)}x{min(850,app.root.winfo_screenheight()-130)}');settle()
     capture('03-review.png',review.window)
     visible(review.confirm_button)
     # Exercise actual PDF rendering, multipage navigation and zoom in the review pane.
@@ -102,7 +102,27 @@ def run(root):
     app.show_documents();app.stage([invalid]);finish();app.start();finish()
     assert app.workspace.summary()['errors']==1
     assert app.heading.cget('text')=='Нужно ваше внимание'
-    app.problems();settle();capture('06-errors.png',app.problem_window.window);app.problem_window.window.destroy()
+    app.problems();settle();capture('06-errors.png',app.problem_window.window)
+    app.problem_window.retry(app.workspace.problems()[0]);settle()
+    assert len(app.paths)==1,'Retry must restore the queue'
+    app.start();finish();assert app.workspace.summary()['errors']==1
+    # Stop during a real import, complete the current document, then resume.
+    import threading
+    entered=threading.Event();release=threading.Event()
+    original_add=app.workspace.add_file
+    def held_add(*args,**kwargs):
+        entered.set();assert release.wait(15),'Stop test did not release import'
+        return original_add(*args,**kwargs)
+    app.show_documents();app.stage([first,second]);finish()
+    with patch.object(app.workspace,'add_file',side_effect=held_add):
+        app.start()
+        deadline=time.monotonic()+15
+        while not entered.is_set():
+            settle();time.sleep(.02);assert time.monotonic()<deadline
+        app.stop_button.invoke();release.set();finish()
+    assert len(app.batch)==1 and len(app.workspace.files()[0])==1
+    app.show_documents();app.start();finish()
+    assert not app.workspace.files()[0] and app.workspace.summary()['documents']==3
     # Verify update offer is deferred and declining leaves data and workflow alone.
     offered=[];future=updater.Release('v99.0.0','','',1)
     with patch.object(messagebox,'askyesno',side_effect=lambda *a,**k:offered.append(True) or False):
@@ -120,5 +140,16 @@ def run(root):
         help_file=help_path();html=help_file.read_text(encoding='utf8')
         assert __version__ in html and 'data:image/png;base64,' in html
     app.root.destroy()
-    result={'ok':True,'checks':['empty_state','picker_or_native_drop_callback','external_originals_preserved','same_patient_incremental_import','per_file_results','small_window_buttons','visible_candidates','pdf_preview_pages_zoom','confirmation_clears_selection','repeat_confirmation_blocked','consistent_result_state','deduplication','actionable_errors','automatic_update_offer_decline','embedded_help' if getattr(sys,'frozen',False) else 'source_capture']}
+    # 144 DPI (150% at the usual 96-DPI baseline), fresh Tcl interpreter.
+    dpi_workspace=root/'dpi-workspace';dpi_workspace.mkdir()
+    (settings_dir/'settings.json').write_text(json.dumps({'workspace':str(dpi_workspace)}),encoding='utf8')
+    app=Application(tk_scaling=2.0)
+    app.root.report_callback_exception=lambda typ,value,tb:errors.append(str(value))
+    settle();visible(app.start_button);visible(app.add_button)
+    app.stage([first,third]);finish();app.start();finish();app.review();settle()
+    capture('review-150-percent.png',app.review_window.window)
+    visible(app.review_window.confirm_button)
+    app.review_window.close();app.show_documents();capture('main-150-percent.png')
+    app.root.destroy()
+    result={'ok':True,'checks':['empty_state','picker_or_native_drop_callback','external_originals_preserved','same_patient_incremental_import','per_file_results','small_window_buttons','150_percent_layout','visible_candidates','pdf_preview_pages_zoom','confirmation_clears_selection','repeat_confirmation_blocked','consistent_result_state','deduplication','actionable_errors','retry_returns_to_queue','stop_and_resume','automatic_update_offer_decline','embedded_help' if getattr(sys,'frozen',False) else 'source_capture']}
     (root/'ui-test.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf8')

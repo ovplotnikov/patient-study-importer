@@ -7,6 +7,7 @@ import queue
 import subprocess
 import sys
 import threading
+import textwrap
 import tkinter as tk
 from tkinter import filedialog,messagebox,ttk
 import traceback
@@ -21,7 +22,7 @@ def open_path(path):
 
 
 class Application:
-    def __init__(self):
+    def __init__(self,tk_scaling=None):
         # The tested Windows bundle always includes TkDnD. Source builds on other
         # platforms may use an incompatible Tk version; the picker remains usable.
         self.dnd=False
@@ -29,19 +30,20 @@ class Application:
             from tkinterdnd2 import TkinterDnD
             self.root=TkinterDnD.Tk();self.dnd=True
         else:self.root=tk.Tk()
+        if tk_scaling is not None:self.root.tk.call('tk','scaling',tk_scaling)
         self.root.title('Исследования пациентов')
-        self.root.geometry(f'{min(1100,self.root.winfo_screenwidth()-50)}x{min(800,self.root.winfo_screenheight()-80)}+20+20')
+        self.root.geometry(f'{min(1100,self.root.winfo_screenwidth()-50)}x{min(800,self.root.winfo_screenheight()-130)}+20+20')
         self.root.minsize(850,620);ui.setup(self.root);self.icons=ui.Icons(self.root)
         self.events=queue.Queue();self.worker=None;self.cancel=threading.Event();self.closing=False
         self.updating=False;self.update_cancel=threading.Event();self.pending_update=None
         self.working=False;self.screen='documents';self.batch=[];self.paths=[]
         self.workspace=None;self.review_window=None;self.problem_window=None
         self.settings=Path(os.environ.get('APPDATA',str(Path.home()/'.config')))/'PatientStudyImporter'/'settings.json'
-        self.frame=ttk.Frame(self.root,padding=(28,20));self.frame.pack(fill='both',expand=True)
-        header=ttk.Frame(self.frame);header.pack(fill='x',pady=(0,18))
+        self.frame=ttk.Frame(self.root,padding=(28,16));self.frame.pack(fill='both',expand=True)
+        header=ttk.Frame(self.frame);header.pack(fill='x',pady=(0,12))
         ttk.Label(header,text='Исследования пациентов',font=(ui.FONT,18,'bold')).pack(side='left')
         ttk.Button(header,text=' Помощь',image=self.icons.get('question-circle'),compound='left',style='Link.TButton',command=self.details).pack(side='right')
-        self.steps=ttk.Frame(self.frame);self.steps.pack(fill='x',pady=(0,20))
+        self.steps=ttk.Frame(self.frame);self.steps.pack(fill='x',pady=(0,12))
         self.step_labels=[]
         for index,(title,icon) in enumerate([('Документы','file-earmark'),('Обработка','gear'),('Результат','table')]):
             self.steps.columnconfigure(index*2,weight=1)
@@ -49,11 +51,11 @@ class Application:
             label.grid(row=0,column=index*2,sticky='ew');self.step_labels.append((label,icon))
             if index<2:ttk.Separator(self.steps,orient='horizontal').grid(row=0,column=index*2+1,sticky='ew',padx=12);self.steps.columnconfigure(index*2+1,weight=1)
         # Bottom controls stay visible even while the central document list scrolls.
-        footer=ttk.Frame(self.frame);footer.pack(side='bottom',fill='x',pady=(12,0))
+        footer=ttk.Frame(self.frame);footer.pack(side='bottom',fill='x',pady=(8,0))
         ttk.Label(footer,text='На этом компьютере',image=self.icons.get('pc-display','muted',18),compound='left',style='Muted.TLabel',font=(ui.FONT,10)).pack(side='left')
         self.choose_button=ttk.Button(footer,text='Папка данных',style='Link.TButton',command=self.folder_menu);self.choose_button.pack(side='left',padx=10)
         ttk.Label(footer,text=f'Версия {__version__}',style='Muted.TLabel',font=(ui.FONT,10)).pack(side='right')
-        self.actions=ttk.Frame(self.frame);self.actions.pack(side='bottom',fill='x',pady=(14,0))
+        self.actions=ttk.Frame(self.frame);self.actions.pack(side='bottom',fill='x',pady=(10,0))
         self.excel_button=ttk.Button(self.actions,text=' Открыть таблицу',image=self.icons.get('table'),compound='left',command=self.open_workbook);self.excel_button.pack(side='left')
         self.start_button=ttk.Button(self.actions,text='Обработать',style='Primary.TButton',command=self.start);self.start_button.pack(side='right')
         self.stop_button=ttk.Button(self.actions,text='Остановить',command=self.stop)
@@ -61,10 +63,10 @@ class Application:
         self.new_button=ttk.Button(self.actions,text='Добавить ещё',command=self.show_documents)
         self.phase=tk.StringVar();self.current=tk.StringVar();self.metrics=tk.StringVar();self.folder_var=tk.StringVar()
         self.heading=ttk.Label(self.frame,text='Документы для обработки',style='Title.TLabel');self.heading.pack(anchor='w')
-        self.phase_label=ttk.Label(self.frame,textvariable=self.phase,style='Muted.TLabel',wraplength=780);self.phase_label.pack(anchor='w',pady=(6,12))
+        self.phase_label=ttk.Label(self.frame,textvariable=self.phase,style='Muted.TLabel',wraplength=780);self.phase_label.pack(anchor='w',pady=(4,6))
         self.progress=ttk.Progressbar(self.frame,mode='determinate')
         self.current_label=ttk.Label(self.frame,textvariable=self.current,wraplength=780,style='Muted.TLabel')
-        self.drop=ttk.Frame(self.frame,padding=(16,14),style='Drop.TFrame')
+        self.drop=ttk.Frame(self.frame,padding=(16,10),style='Drop.TFrame')
         self.drop.pack(side='bottom',fill='x',pady=(8,0))
         self.drop_label=ttk.Label(self.drop,text='Перетащите файлы сюда' if self.dnd else 'Добавьте файлы с компьютера',image=self.icons.get('download'),compound='left',style='Drop.TLabel');self.drop_label.pack(side='left')
         self.add_button=ttk.Button(self.drop,text='Добавить файлы',command=self.add_files);self.add_button.pack(side='right')
@@ -367,11 +369,12 @@ class ReviewWindow:
         self.workspace=workspace;self.on_change=on_change;self.selected=None
         self.icons=icons or ui.Icons(parent);self.preview_document=None;self.page=0;self.zoom=1.0
         self.window=tk.Toplevel(parent);self.window.title('Уточнение пациента');self.window.configure(bg='white')
-        self.window.geometry(f'{min(1240,parent.winfo_screenwidth()-50)}x{min(850,parent.winfo_screenheight()-80)}+25+25')
+        self.window.geometry(f'{min(1240,parent.winfo_screenwidth()-50)}x{min(850,parent.winfo_screenheight()-130)}+25+25')
         self.window.minsize(850,620);self.window.transient(parent);self.window.grab_set()
         self.window.protocol('WM_DELETE_WINDOW',self.close)
         outer=ttk.Frame(self.window,padding=22);outer.pack(fill='both',expand=True)
         self.title=ttk.Label(outer,text='Кому принадлежит документ?',style='Heading.TLabel');self.title.pack(anchor='w',pady=(0,12))
+        self.window.bind('<Configure>',lambda e:self.title.configure(wraplength=max(500,e.width-44)) if e.widget is self.window else None)
         self.list=ttk.Treeview(outer,columns=('file','reason'),show='headings',height=3,selectmode='browse')
         self.list.heading('file',text='Документ');self.list.heading('reason',text='Что проверить')
         self.list.column('file',width=330);self.list.column('reason',width=600)
@@ -381,7 +384,7 @@ class ReviewWindow:
         self.panes.add(self.left,weight=3);self.panes.add(self.right,weight=2)
         toolbar=ttk.Frame(self.left);toolbar.pack(fill='x')
         self.preview_title=ttk.Label(toolbar,text='Документ',font=(ui.FONT,12,'bold'));self.preview_title.pack(side='left')
-        self.original_button=ttk.Button(toolbar,text='Открыть оригинал',style='Link.TButton',command=self.open_original);self.original_button.pack(side='right')
+        self.original_button=ttk.Button(toolbar,text='Оригинал',style='Link.TButton',command=self.open_original);self.original_button.pack(side='right')
         self.page_label=tk.StringVar();self.preview_nav=ttk.Frame(self.left)
         self.preview_nav.pack(fill='x',pady=8)
         ttk.Button(self.preview_nav,image=self.icons.get('arrow-left','blue',18),command=lambda:self.turn_page(-1),width=3).pack(side='left')
@@ -424,6 +427,7 @@ class ReviewWindow:
         self.selected=None;self.name.set('');self.birth.set('');self.validation.set('')
         self.confirm_button.configure(state='disabled');self.original_button.configure(state='disabled')
         self.records={row['id']:row for row in self.workspace.review_list()}
+        self.list.configure(height=min(2,max(1,len(self.records))))
         for item in self.list.get_children():self.list.delete(item)
         for record in self.records.values():self.list.insert('','end',iid=record['id'],values=(record['filename'],ui.reason_text(record)))
         if self.records:
@@ -443,12 +447,10 @@ class ReviewWindow:
         self.validation.set('');self.confirm_button.configure(state='normal');self.original_button.configure(state='normal')
         self.candidate_area.clear();self.candidates=record['candidates']
         ttk.Label(self.candidate_area.body,text='Возможные совпадения' if self.candidates else 'Введите данные из оригинала',font=(ui.FONT,12,'bold')).pack(anchor='w',pady=(0,10))
-        if self.candidates:
-            ttk.Label(self.candidate_area.body,text='Сверьте ФИО и дату рождения с документом.',wraplength=330,style='Muted.TLabel').pack(anchor='w',pady=(0,10))
         for name,birth in self.candidates:
             day=datetime.strptime(birth,'%Y-%m-%d').strftime('%d.%m.%Y')
             frame=ttk.Frame(self.candidate_area.body,padding=(0,4));frame.pack(fill='x')
-            ttk.Button(frame,text=name+'\n'+day,command=lambda n=name,b=birth:self.use_candidate(n,b)).pack(fill='x')
+            ttk.Button(frame,text='\n'.join(textwrap.wrap(name,24))+'\n'+day,command=lambda n=name,b=birth:self.use_candidate(n,b)).pack(fill='x')
             basis=[]
             if birth in record['births']:basis.append('дата рождения')
             if name in record['names']:basis.append('ФИО')
@@ -476,7 +478,7 @@ class ReviewWindow:
             self.canvas.pack(fill='both',expand=True);self.text_scroll.configure(command=self.canvas.yview)
             self.window.after_idle(self.render_preview)
         except Exception:
-            self.preview_title.configure(text='Текст документа · сверяйте с оригиналом')
+            self.preview_title.configure(text='Извлечённый текст')
             self.text.pack(fill='both',expand=True);self.text_scroll.configure(command=self.text.yview)
 
     def render_preview(self):

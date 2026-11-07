@@ -59,6 +59,14 @@ jobs:
         run: python packaging/test_windows_update.py
       - uses: actions/upload-artifact@v4
         with:
+          name: interface-and-guide
+          path: |
+            dist/screenshots/
+            dist/docs/
+            dist/*test.json
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
           name: patient-study-importer-windows
           path: dist/
           retention-days: 30

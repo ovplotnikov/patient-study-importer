@@ -79,7 +79,7 @@ def reason_text(record):
         missing=[]
         if not record['names']:missing.append('ФИО')
         if not record['births']:missing.append('дата рождения')
-        return 'Не найдены: '+', '.join(missing) if missing else 'Проверьте ФИО и дату рождения'
+        return {'ФИО':'Не найдено ФИО','дата рождения':'Не найдена дата рождения'}.get(', '.join(missing),'Не найдены ФИО и дата рождения') if missing else 'Проверьте ФИО и дату рождения'
     return reason
 
 
