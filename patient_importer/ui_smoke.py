@@ -63,15 +63,17 @@ def run(root):
     visible(app.start_button);visible(app.add_button)
     capture('01-ready.png')
     app.root.geometry('850x620');settle();visible(app.start_button);visible(app.add_button)
-    capture('small-window.png');app.root.geometry('1100x800');settle()
+    capture('small-window.png');app.root.geometry(f'{min(1100,app.root.winfo_screenwidth()-50)}x{min(800,app.root.winfo_screenheight()-80)}');settle()
     app.start_button.invoke();finish()
     summary=app.workspace.summary();assert summary['documents']==3 and summary['patients']==1 and summary['review']==1,summary
     assert app.screen=='result'
     capture('02-result.png')
     app.review();settle();review=app.review_window
     assert review.selected and review.candidates
-    visible(review.confirm_button)
+    review.window.geometry('850x620');settle();visible(review.confirm_button);capture('review-small-window.png',review.window)
+    review.window.geometry(f'{min(1240,app.root.winfo_screenwidth()-50)}x{min(850,app.root.winfo_screenheight()-80)}');settle()
     capture('03-review.png',review.window)
+    visible(review.confirm_button)
     # Exercise actual PDF rendering, multipage navigation and zoom in the review pane.
     from pypdf import PdfWriter
     preview=root/'preview.pdf';writer=PdfWriter()

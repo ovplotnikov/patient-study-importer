@@ -397,9 +397,9 @@ class ReviewWindow:
         self.text=tk.Text(self.preview_area,wrap='word',font=(ui.FONT,12),padx=12,pady=12,relief='flat',width=35)
         self.text.configure(yscrollcommand=scroll.set)
         self.text_scroll=scroll
-        self.candidate_area=ui.ScrollArea(self.right);self.candidate_area.pack(fill='both',expand=True)
+        self.candidate_area=ui.ScrollArea(self.right)
         self.candidates=[]
-        fields=ttk.Frame(self.right);fields.pack(fill='x',pady=12)
+        fields=ttk.Frame(self.right);fields.pack(side='bottom',fill='x',pady=12)
         ttk.Label(fields,text='ФИО полностью').pack(anchor='w')
         self.name=tk.StringVar();self.birth=tk.StringVar()
         self.name_entry=ttk.Entry(fields,textvariable=self.name);self.name_entry.pack(fill='x',pady=(6,12))
@@ -407,7 +407,8 @@ class ReviewWindow:
         self.birth_entry=ttk.Entry(fields,textvariable=self.birth);self.birth_entry.pack(fill='x',pady=(6,4))
         ttk.Label(fields,text='ДД.ММ.ГГГГ',style='Muted.TLabel',font=(ui.FONT,10)).pack(anchor='w')
         self.validation=tk.StringVar();ttk.Label(fields,textvariable=self.validation,foreground='#b42318',wraplength=330).pack(anchor='w',pady=6)
-        self.confirm_button=ttk.Button(self.right,text='Подтвердить пациента',style='Primary.TButton',command=self.confirm);self.confirm_button.pack(fill='x')
+        self.confirm_button=ttk.Button(self.right,text='Подтвердить пациента',style='Primary.TButton',command=self.confirm);self.confirm_button.pack(side='bottom',fill='x',before=fields)
+        self.candidate_area.pack(fill='both',expand=True)
         self.success=ttk.Frame(outer,padding=40)
         ttk.Label(self.success,image=self.icons.get('check-circle','green',64)).pack(pady=15)
         ttk.Label(self.success,text='Все документы уточнены',style='Heading.TLabel').pack(pady=8)
