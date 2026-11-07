@@ -9,7 +9,9 @@ import threading
 import unittest
 from unittest.mock import Mock, patch
 
-from patient_importer.telemetry import Diagnostics, SEND_INTERVAL, post_report
+from patient_importer.telemetry import (
+    Diagnostics, MAX_ACK_BYTES, SEND_INTERVAL, apps_ack_target, endpoint_url, post_report,
+)
 from patient_importer.telemetry_schema import MAX_COUNT, validate_report
 
 URL = 'https://metrics.example.com/v1/counters'
@@ -299,6 +301,135 @@ class DiagnosticsTests(unittest.TestCase):
         with patch('patient_importer.telemetry.post_report', side_effect=transport):
             self.assertTrue(self.diag.send_if_due())
         self.assertEqual(self.diag.snapshot()['counters'], {'formats': {'pdf': 12}})
+
+
+DEPLOYMENT = 'AKfycbx_Synthetic-Deployment-test'
+GOOGLE_PATH = f'/macros/s/{DEPLOYMENT}/exec/v1/counters'
+GOOGLE_URL = f'https://script.google.com{GOOGLE_PATH}'
+ACK_TARGET = '/macros/echo?user_content_key=opaque_key-123%3D&lib=opaque_lib-456'
+ACK_URL = 'https://script.googleusercontent.com' + ACK_TARGET
+
+
+class AppsScriptTransportTests(unittest.TestCase):
+    @staticmethod
+    def response(status, *, headers=None, data=b''):
+        connection = Mock()
+        response = connection.getresponse.return_value
+        response.status = status
+        response.getheader.side_effect = (headers or {}).get
+        response.read.return_value = data
+        return connection
+
+    def client(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        return Diagnostics(Path(temp.name), GOOGLE_URL, app_version=VERSION)
+
+    def test_only_canonical_google_web_app_endpoint(self):
+        self.assertEqual(endpoint_url(GOOGLE_URL), GOOGLE_URL)
+        self.assertEqual(endpoint_url(GOOGLE_URL.replace('.com/', '.com:443/')), GOOGLE_URL)
+        for value in (
+            GOOGLE_URL + '?x=y', GOOGLE_URL + '#', GOOGLE_URL + '?', GOOGLE_URL + '/',
+            GOOGLE_URL.replace('https:', 'http:'), GOOGLE_URL.replace('/exec/', '/dev/'),
+            GOOGLE_URL.replace(DEPLOYMENT, 'x'), GOOGLE_URL.replace(DEPLOYMENT, 'a'*257),
+            GOOGLE_URL.replace(DEPLOYMENT, 'a'*19 + '%2f'),
+            GOOGLE_URL.replace('.com/', '.com:444/'),
+            GOOGLE_URL.replace('script.google.com', 'script.google.com.example.org'),
+            GOOGLE_URL.replace('script.google.com', 'test@script.google.com'),
+            'https://script.google.com/v1/counters',
+        ):
+            self.assertEqual(endpoint_url(value), '')
+
+    def test_no_google_connection_without_consent(self):
+        client = self.client()
+        self.assertTrue(client.configured)
+        with patch('patient_importer.telemetry.http.client.HTTPSConnection') as connect:
+            self.assertFalse(client.record('formats', 'pdf', 10))
+            self.assertFalse(client.send_if_due())
+            connect.assert_not_called()
+
+    def test_google_redirect_fetches_only_bodyless_ack(self):
+        client = self.client()
+        self.assertTrue(client.set_consent(True))
+        self.assertTrue(client.record('formats', 'pdf', 10))
+        self.assertFalse(client.record('formats', CANARY))
+        post = self.response(302, headers={'Location': ACK_URL, 'Set-Cookie': 'not-forwarded=1'})
+        ack = self.response(200, headers={'Content-Type': 'application/json; charset=UTF-8'}, data=b'{"ok":true}')
+        with patch('patient_importer.telemetry.http.client.HTTPSConnection', side_effect=[post, ack]) as connect:
+            self.assertTrue(client.send_if_due())
+        self.assertIsNone(client.snapshot())
+        self.assertEqual([call.args[0] for call in connect.call_args_list],
+                         ['script.google.com', 'script.googleusercontent.com'])
+        args, kwargs = post.request.call_args
+        self.assertEqual(args, ('POST', GOOGLE_PATH))
+        self.assertEqual(kwargs['body'], b'{"app_version":"2.4.0","counters":{"formats":{"pdf":10}},"schema_version":1}')
+        self.assertEqual(kwargs['headers'], {'Content-Type': 'application/json',
+                                             'User-Agent': 'PatientStudyImporter-Diagnostics'})
+        post.getresponse.return_value.read.assert_not_called()
+        ack.request.assert_called_once_with('GET', ACK_TARGET)
+        ack.getresponse.return_value.read.assert_called_once_with(MAX_ACK_BYTES + 1)
+        post.close.assert_called_once()
+        ack.close.assert_called_once()
+
+    def test_reject_malicious_redirects_and_post_replay(self):
+        for value in (
+            ACK_URL.replace('https:', 'http:'), ACK_URL.replace('/echo?', '/elsewhere?'),
+            ACK_URL.replace('.com/', '.com:444/'), ACK_URL.replace('.com/', '.com.evil.invalid/'),
+            ACK_URL.replace('script.googleusercontent.com', 'user@script.googleusercontent.com'),
+            ACK_URL + '&path=' + CANARY, ACK_URL + '&lib=duplicate', ACK_URL + '#',
+            ACK_URL.replace('%3D', '%0A'), ACK_URL.replace('%3D', '%26x%3D'),
+            ACK_URL.replace('%3D', '%xx'), ACK_URL.replace('&lib=opaque_lib-456', ''),
+            ACK_URL.replace('lib=', '%6Cib='), ACK_URL.replace('opaque_key-123%3D', ''),
+            ACK_URL + 'x'*2100, 'https://accounts.google.com/signin', ACK_URL + '\r\n',
+        ):
+            self.assertEqual(apps_ack_target(value), '', value)
+            post = self.response(302, headers={'Location': value})
+            with patch('patient_importer.telemetry.http.client.HTTPSConnection', return_value=post) as connect:
+                self.assertFalse(post_report(GOOGLE_URL, b'{}'))
+                connect.assert_called_once()
+                post.request.assert_called_once()
+        for status in (200, 204, 301, 307, 308):
+            post = self.response(status, headers={'Location': ACK_URL})
+            with patch('patient_importer.telemetry.http.client.HTTPSConnection', return_value=post) as connect:
+                self.assertFalse(post_report(GOOGLE_URL, b'{}'))
+                connect.assert_called_once()
+
+    def test_invalid_or_missing_ack_keeps_queue_without_another_redirect(self):
+        for status, content_type, data in (
+            (200, 'text/html', b'<html>Sign in</html>'),
+            (200, 'application/json', b'{"ok":false}'),
+            (200, 'application/json', b'{"ok":1}'),
+            (200, 'application/json', b'{"ok":true,"details":"error"}'),
+            (200, 'application/json', b'{"ok":false,"ok":true}'),
+            (200, 'application/json', b'{"ok":true}' + b' '*MAX_ACK_BYTES),
+            (200, 'application/json', b'\xff'),
+            (200, 'application/json', b'{"ok":'),
+            (200, '', b'{"ok":true}'),
+            (302, 'application/json', b'{"ok":true}'),
+        ):
+            with self.subTest(status=status, content_type=content_type, data=data[:16]):
+                client = self.client()
+                self.assertTrue(client.set_consent(True))
+                self.assertTrue(client.record('formats', 'pdf', 10))
+                post = self.response(303, headers={'Location': ACK_URL})
+                ack = self.response(status, headers={'Content-Type': content_type, 'Location': ACK_URL}, data=data)
+                with patch('patient_importer.telemetry.http.client.HTTPSConnection', side_effect=[post, ack]) as connect:
+                    self.assertFalse(client.send_if_due())
+                self.assertEqual(connect.call_count, 2)
+                self.assertEqual(client.snapshot()['counters'], {'formats': {'pdf': 10}})
+                self.assertFalse(client.send_if_due())
+
+    def test_ack_timeout_keeps_queue(self):
+        client = self.client()
+        self.assertTrue(client.set_consent(True))
+        self.assertTrue(client.record('formats', 'pdf', 10))
+        post = self.response(303, headers={'Location': ACK_URL})
+        ack = self.response(200, headers={'Content-Type': 'application/json'})
+        ack.getresponse.return_value.read.side_effect = TimeoutError()
+        with patch('patient_importer.telemetry.http.client.HTTPSConnection', side_effect=[post, ack]):
+            self.assertFalse(client.send_if_due())
+        self.assertEqual(client.snapshot()['counters'], {'formats': {'pdf': 10}})
+        ack.close.assert_called_once()
 
 
 class ReportSchemaTests(unittest.TestCase):

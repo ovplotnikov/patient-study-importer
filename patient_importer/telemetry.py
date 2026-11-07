@@ -8,7 +8,7 @@ import re
 import ssl
 import tempfile
 import time
-from urllib.parse import urlsplit
+from urllib.parse import unquote_to_bytes, urlsplit
 
 import portalocker
 
@@ -26,6 +26,16 @@ CONSENT_LOCK_TIMEOUT = 6
 MAX_STATE_BYTES = MAX_REPORT_BYTES + 1024
 MAX_EPOCH = (1 << 63) - 1
 HOST_LABEL = re.compile(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?')
+APPS_SCRIPT_HOST = 'script.google.com'
+APPS_SCRIPT_PATH = re.compile(r'/macros/s/[A-Za-z0-9_-]{20,256}/exec' + COUNTERS_PATH)
+APPS_ACK_HOST = 'script.googleusercontent.com'
+APPS_ACK_PATH = '/macros/echo'
+MAX_ACK_URL = 2048
+MAX_ACK_BYTES = 128
+ACK_PARAMETERS = frozenset({'user_content_key', 'lib'})
+ACK_TOKEN = re.compile(r'(?:[A-Za-z0-9_+=./~-]|%[0-9A-Fa-f]{2})+')
+ACK_DECODED_TOKEN = re.compile(rb'[A-Za-z0-9_+=./~-]+')
+ACK_CONTENT_TYPE = re.compile(r'application/json(?:\s*;\s*charset\s*=\s*(?:"utf-8"|utf-8))?', re.I)
 STATE_KEYS = frozenset({
     'schema_version', 'consent_version', 'consent', 'endpoint',
     'app_version', 'last_attempt', 'counters', 'epoch',
@@ -34,9 +44,9 @@ STATE_KEYS = frozenset({
 
 def endpoint_url(value):
     """Accept only an explicitly configured origin and the fixed route."""
-    if type(value) is not str or not value or len(value) > 300 or not value.isascii():
+    if type(value) is not str or not value or len(value) > 360 or not value.isascii():
         return ''
-    if not value.startswith('https://') or any(ord(char) < 33 for char in value):
+    if not value.startswith('https://') or any(not 33 <= ord(char) <= 126 for char in value):
         return ''
     try:
         parsed = urlsplit(value)
@@ -44,14 +54,19 @@ def endpoint_url(value):
         labels = host.split('.')
         if (parsed.username is not None or parsed.password is not None
                 or parsed.port not in (None, 443) or parsed.query or parsed.fragment
-                or parsed.path != COUNTERS_PATH or len(host) > 253 or len(labels) < 2
+                or len(host) > 253 or len(labels) < 2
                 or not all(HOST_LABEL.fullmatch(label) for label in labels)
                 or not any(char.isalpha() for char in labels[-1])):
             return ''
-        # Exact comparison rejects an empty query/fragment, backslashes and odd netloc spellings.
-        if value not in (f'https://{host}{COUNTERS_PATH}', f'https://{host}:443{COUNTERS_PATH}'):
+        if host == APPS_SCRIPT_HOST:
+            if not APPS_SCRIPT_PATH.fullmatch(parsed.path):
+                return ''
+        elif host == APPS_ACK_HOST or parsed.path != COUNTERS_PATH:
             return ''
-        return f'https://{host}{COUNTERS_PATH}'
+        # Exact comparison rejects an empty query/fragment, backslashes and odd netloc spellings.
+        if value not in (f'https://{host}{parsed.path}', f'https://{host}:443{parsed.path}'):
+            return ''
+        return f'https://{host}{parsed.path}'
     except ValueError:
         return ''
 
@@ -65,20 +80,75 @@ def unique_object(pairs):
     return result
 
 
+def apps_ack_target(value):
+    """Validate the Google-supplied one-time acknowledgement URL."""
+    if type(value) is not str or len(value) > MAX_ACK_URL:
+        return ''
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return ''
+    if (parsed.scheme != 'https' or parsed.netloc not in (APPS_ACK_HOST, APPS_ACK_HOST + ':443')
+            or parsed.path != APPS_ACK_PATH or not parsed.query
+            or value != f'https://{parsed.netloc}{APPS_ACK_PATH}?{parsed.query}'):
+        return ''
+    keys = set()
+    for pair in parsed.query.split('&'):
+        key, separator, token = pair.partition('=')
+        if (not separator or key not in ACK_PARAMETERS or key in keys
+                or not ACK_TOKEN.fullmatch(token)
+                or not ACK_DECODED_TOKEN.fullmatch(unquote_to_bytes(token))):
+            return ''
+        keys.add(key)
+    if keys != ACK_PARAMETERS:
+        return ''
+    return f'{APPS_ACK_PATH}?{parsed.query}'
+
+
+def fetch_apps_ack(target, context):
+    connection = http.client.HTTPSConnection(APPS_ACK_HOST, timeout=NETWORK_TIMEOUT, context=context)
+    try:
+        # Only this bodyless request may follow Google's ContentService redirect.
+        connection.request('GET', target)
+        response = connection.getresponse()
+        content_type = response.getheader('Content-Type', '')
+        if response.status != 200 or not ACK_CONTENT_TYPE.fullmatch(content_type.strip()):
+            return False
+        body = response.read(MAX_ACK_BYTES + 1)
+        if len(body) > MAX_ACK_BYTES:
+            return False
+        try:
+            parsed = json.loads(body.decode('utf-8'), object_pairs_hook=unique_object)
+        except (ValueError, UnicodeError):
+            return False
+        return type(parsed) is dict and parsed.keys() == {'ok'} and parsed['ok'] is True
+    finally:
+        connection.close()
+
+
 def post_report(endpoint, body):
-    """Direct TLS, with no proxy, redirect, environment headers or response data."""
-    host = urlsplit(endpoint).hostname
+    """Post directly over TLS. The optional Apps Script ACK is one bodyless GET."""
+    endpoint = endpoint_url(endpoint)
+    if not endpoint:
+        return False
+    parsed = urlsplit(endpoint)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.load_default_certs()
-    connection = http.client.HTTPSConnection(host, timeout=NETWORK_TIMEOUT, context=context)
+    connection = http.client.HTTPSConnection(parsed.hostname, timeout=NETWORK_TIMEOUT, context=context)
     try:
-        connection.request('POST', COUNTERS_PATH, body=body, headers={
+        connection.request('POST', parsed.path, body=body, headers={
             'Content-Type': 'application/json',
             'User-Agent': 'PatientStudyImporter-Diagnostics',
         })
-        return connection.getresponse().status == 204
+        response = connection.getresponse()
+        if parsed.hostname != APPS_SCRIPT_HOST:
+            return response.status == 204
+        if response.status not in (302, 303):
+            return False
+        target = apps_ack_target(response.getheader('Location', ''))
     finally:
         connection.close()
+    return bool(target) and fetch_apps_ack(target, context)
 
 
 class Diagnostics:

@@ -1,0 +1,15 @@
+{
+  "timeZone": "Etc/UTC",
+  "exceptionLogging": "NONE",
+  "runtimeVersion": "V8",
+  "oauthScopes": ["https://www.googleapis.com/auth/drive.file"],
+  "dependencies": {
+    "enabledAdvancedServices": [
+      {"userSymbol": "Sheets", "version": "v4", "serviceId": "sheets"}
+    ]
+  },
+  "webapp": {
+    "executeAs": "USER_DEPLOYING",
+    "access": "ANYONE_ANONYMOUS"
+  }
+}
