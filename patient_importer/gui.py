@@ -144,7 +144,7 @@ class Application:
         if not self.workspace:return
         summary=self.workspace.summary()
         self.metrics.set(f"В таблице · Документы: {summary['documents']} · Пациенты: {summary['patients']}")
-        self.excel_button.config(state='normal' if Path(summary['workbook']).exists() and not self.working else 'disabled')
+        self.excel_button.config(state='normal' if Path(summary['workbook']).exists() and not summary.get('pending_export') and not self.working else 'disabled')
         self.review_button.config(state='normal' if summary['total_review'] and not self.working else 'disabled')
         if self.screen=='result' and not self.working:self.show_result()
         return summary
@@ -233,7 +233,7 @@ class Application:
             self.new_button.pack(side='right',padx=10)
         else:
             self.new_button.pack(side='right');self.excel_button.configure(style='Primary.TButton',image=self.icons.get('table','white'))
-        self.excel_button.configure(state='normal' if Path(summary['workbook']).exists() else 'disabled')
+        self.excel_button.configure(state='normal' if Path(summary['workbook']).exists() and not summary.get('pending_export') else 'disabled')
         if summary['review']:self.row('Уточните пациента',f"Документов: {summary['review']}",self.icons.get('exclamation-triangle','amber',32),self.review,'Проверить')
         if summary['quality_review']:self.row('Сверьте данные с оригиналом',f"Документов: {summary['quality_review']} · Показатели пока не подтверждены",self.icons.get('exclamation-triangle','amber',32),self.review,'Проверить')
         if summary.get('incomplete'):self.row('Сверено с замечаниями',f"Документов: {summary['incomplete']} · Причины сохранены в таблице",self.icons.get('exclamation-triangle','amber',32),self.history,'Посмотреть')
@@ -349,6 +349,8 @@ class Application:
 
     def open_workbook(self):
         if not self.workspace:return
+        if self.workspace.summary().get('pending_export'):
+            self.show_documents();self.phase.set('Сначала сохраните актуальную таблицу. Закройте Excel и нажмите «Сохранить таблицу».');return
         path=self.workspace.root/'Исследования.xlsx'
         if path.exists():
             try:open_path(path)

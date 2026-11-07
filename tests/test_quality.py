@@ -137,3 +137,13 @@ class QualityTests(unittest.TestCase):
         self.assertEqual(codes(result), {'missing_date', 'missing_unit'})
         self.assertEqual(assess(result)['issues'], issues(result))
         self.assertNotIn('quality', result)
+
+    def test_legacy_parser_version_requires_review_even_if_visible_fields_are_complete(self):
+        current = parsed(IDENTITY + DATE + LAB + 'Гемоглобин  120 г/л')
+        self.assertFalse(needs_review(current))
+        legacy = {key: value for key, value in current.items() if key != 'quality'}
+        legacy['version'] = '2.0.0'
+        self.assertEqual(codes(legacy), {'legacy_parser'})
+        self.assertNotIn('quality', legacy)
+        del legacy['version']
+        self.assertFalse(needs_review(legacy))

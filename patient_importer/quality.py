@@ -5,6 +5,7 @@ import re
 
 from .parsing import COMPARATOR, KNOWN_UNIT, LABORATORY_TYPES, RANGE, SCALAR, classify_pages, classify_study, document_dates
 
+REVIEWED_PARSER_VERSION = '2.3.0'
 UNITLESS_LABEL = re.compile(
     r'^(?:ph|рн|inr|мно|цветовой показатель|относительная плотность|удельный вес)(?:\b|$)|'
     r'\b(?:коэффициент|индекс|отношение)\b',
@@ -64,6 +65,10 @@ def assess(analysis, extracted=None):
             if value is not None:
                 issue[key] = value
         findings.append(issue)
+
+    parser_version = analysis.get('version')
+    if parser_version and parser_version != REVIEWED_PARSER_VERSION:
+        add('legacy_parser', 'Документ обработан прежней версией. Сверьте оригинал или распознайте заново.')
 
     pages = analysis.get('pages', [])
     dates = analysis.get('date_candidates')

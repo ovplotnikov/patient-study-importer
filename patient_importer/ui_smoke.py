@@ -150,6 +150,10 @@ def run(root):
     visible(history.apply_button);history.apply_button.invoke();settle()
     assert app.workspace.summary()['documents']==3 and app.workspace.summary()['total_review']==0
     history.close();settle()
+    with app.workspace.connect() as db:app.workspace.touch(db)
+    app.refresh();settle();assert str(app.excel_button['state'])=='disabled','Stale workbook must not look current'
+    app.show_documents();settle();assert str(app.start_button['state'])=='normal'
+    app.start();finish();assert str(app.excel_button['state'])=='normal'
     assert all(p.exists() for p in [first,second,third]),'External originals changed'
     app.show_documents();app.stage([first]);finish();app.start();finish()
     assert app.workspace.summary()['documents']==3 and app.batch[0]['status']=='Повтор'
@@ -243,5 +247,5 @@ def run(root):
     quality.window.destroy()
     app.root.destroy()
     ocr_patch.stop()
-    result={'ok':True,'checks':['empty_state','picker_or_native_drop_callback','external_originals_preserved','same_patient_incremental_import','per_file_results','small_window_buttons','wheel_over_row','150_percent_layout','visible_candidates','pdf_preview_pages_zoom','confirmation_clears_selection','repeat_confirmation_blocked','consistent_result_state','quality_stays_pending_after_identity','explicit_quality_attestation','inequality_and_corrected_unit_preserved','quality_small_window_and_150_percent','reprocess_preview_apply_same_study','narrative_text_correction','manual_duplicate_comparison','deduplication','actionable_errors','retry_returns_to_queue','stop_and_resume','automatic_update_offer_decline','embedded_help' if getattr(sys,'frozen',False) else 'source_capture']}
+    result={'ok':True,'checks':['empty_state','picker_or_native_drop_callback','external_originals_preserved','same_patient_incremental_import','per_file_results','small_window_buttons','wheel_over_row','150_percent_layout','visible_candidates','pdf_preview_pages_zoom','confirmation_clears_selection','repeat_confirmation_blocked','consistent_result_state','quality_stays_pending_after_identity','explicit_quality_attestation','inequality_and_corrected_unit_preserved','quality_small_window_and_150_percent','reprocess_preview_apply_same_study','stale_workbook_requires_save','narrative_text_correction','manual_duplicate_comparison','deduplication','actionable_errors','retry_returns_to_queue','stop_and_resume','automatic_update_offer_decline','embedded_help' if getattr(sys,'frozen',False) else 'source_capture']}
     (root/'ui-test.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf8')
