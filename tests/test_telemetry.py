@@ -304,7 +304,7 @@ class DiagnosticsTests(unittest.TestCase):
 
 
 DEPLOYMENT = 'AKfycbx_Synthetic-Deployment-test'
-GOOGLE_PATH = f'/macros/s/{DEPLOYMENT}/exec/v1/counters'
+GOOGLE_PATH = f'/macros/s/{DEPLOYMENT}/exec'
 GOOGLE_URL = f'https://script.google.com{GOOGLE_PATH}'
 ACK_TARGET = '/macros/echo?user_content_key=opaque_key-123%3D&lib=opaque_lib-456'
 ACK_URL = 'https://script.googleusercontent.com' + ACK_TARGET
@@ -330,7 +330,8 @@ class AppsScriptTransportTests(unittest.TestCase):
         self.assertEqual(endpoint_url(GOOGLE_URL.replace('.com/', '.com:443/')), GOOGLE_URL)
         for value in (
             GOOGLE_URL + '?x=y', GOOGLE_URL + '#', GOOGLE_URL + '?', GOOGLE_URL + '/',
-            GOOGLE_URL.replace('https:', 'http:'), GOOGLE_URL.replace('/exec/', '/dev/'),
+            GOOGLE_URL.replace('https:', 'http:'), GOOGLE_URL.removesuffix('/exec') + '/dev',
+            GOOGLE_URL + '/v1/counters', GOOGLE_URL + '/healthz',
             GOOGLE_URL.replace(DEPLOYMENT, 'x'), GOOGLE_URL.replace(DEPLOYMENT, 'a'*257),
             GOOGLE_URL.replace(DEPLOYMENT, 'a'*19 + '%2f'),
             GOOGLE_URL.replace('.com/', '.com:444/'),

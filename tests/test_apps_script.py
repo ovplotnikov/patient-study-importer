@@ -6,7 +6,7 @@ import subprocess
 import unittest
 
 from patient_importer.telemetry_schema import (
-    COUNTERS_PATH, MAX_COUNT, MAX_REPORT_BYTES, METRICS, MIN_ATTEMPTS, SCHEMA_VERSION,
+    MAX_COUNT, MAX_REPORT_BYTES, METRICS, MIN_ATTEMPTS, SCHEMA_VERSION,
 )
 
 ROOT = Path(__file__).resolve().parents[1] / 'google_apps_script'
@@ -168,7 +168,7 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(',', ':'))
 
 
-def post(body=None, *, path=COUNTERS_PATH.removeprefix('/'), query=None, mime='application/json'):
+def post(body=None, *, path='', query=None, mime='application/json'):
     body = canonical(report()) if body is None else body
     length = len(body.encode('utf8'))
     return {'action': 'post', 'event': {
@@ -212,7 +212,7 @@ class AppsScriptTests(unittest.TestCase):
         result = self.run_script([])
         self.assertEqual(result['schema'], {
             'schemaVersion': SCHEMA_VERSION,
-            'pathInfo': COUNTERS_PATH.removeprefix('/'),
+            'pathInfo': '',
             'maxReportBytes': MAX_REPORT_BYTES,
             'maxCount': MAX_COUNT,
             'minAttempts': MIN_ATTEMPTS,
@@ -249,15 +249,25 @@ class AppsScriptTests(unittest.TestCase):
         self.assertEqual(result['created'], [])
 
     def test_posts_merge_totals_and_health_does_not_read_sheets(self):
+        first = post()
+        del first['event']['pathInfo']
         result = self.run_script([
-            post(), post(canonical(report(12)), mime='application/json; charset=UTF-8'),
+            first, post(canonical(report(12)), path=None, mime='application/json; charset=UTF-8'),
+            {'action': 'get', 'event': {'queryString': None}},
+            {'action': 'get', 'event': {'pathInfo': None, 'queryString': ''}},
+            {'action': 'get', 'event': {'pathInfo': '', 'queryString': None}},
             {'action': 'get', 'event': {'pathInfo': 'healthz', 'queryString': None}},
             {'action': 'get', 'event': {'pathInfo': 'v1/counters', 'queryString': None}},
+            {'action': 'get', 'event': {'pathInfo': '', 'queryString': 'bad=1'}},
         ])
         self.assertEqual(result['result'], [
             {'body': '{"ok":true}', 'mime': 'json'},
             {'body': '{"ok":true}', 'mime': 'json'},
             {'body': '{"ok":true}', 'mime': 'json'},
+            {'body': '{"ok":true}', 'mime': 'json'},
+            {'body': '{"ok":true}', 'mime': 'json'},
+            {'body': '{"ok":false}', 'mime': 'json'},
+            {'body': '{"ok":false}', 'mime': 'json'},
             {'body': '{"ok":false}', 'mime': 'json'},
         ])
         self.assertEqual(result['rows'], [HEADER, [VERSION, 'formats', 'pdf', 22],
@@ -284,7 +294,8 @@ class AppsScriptTests(unittest.TestCase):
             post(good.replace('"pdf":10', '"pdf":1e1')),
             post(json.dumps(report(), indent=2)),
             post(MARKER * 1000), post('☠'),
-            post(query=MARKER), post(path='/' + COUNTERS_PATH.removeprefix('/')),
+            post(query=MARKER), post(path='v1/counters'), post(path='/'),
+            post(path=0), post(path=False), post(path={}), post(path=[]),
             post(mime='multipart/form-data; boundary=' + MARKER),
             wrong_length,
         ]

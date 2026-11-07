@@ -205,7 +205,7 @@ def run(root):
     from .telemetry import Diagnostics
     from .diagnostics_ui import DiagnosticsWindow, SupportWindow
     support_email=diagnostics_config.SUPPORT_EMAIL or 'templates@example.org'
-    diagnostics_example='https://script.google.com/macros/s/AKfycb_TEST_DIAGNOSTICS_ONLY_00000000000000000000/exec/v1/counters'
+    diagnostics_example='https://script.google.com/macros/s/AKfycb_TEST_DIAGNOSTICS_ONLY_00000000000000000000/exec'
     test_diagnostics=Diagnostics(settings_dir/'test-diagnostics', endpoint=diagnostics_example)
     assert test_diagnostics.should_prompt() and test_diagnostics.mark_prompted()
     assert not test_diagnostics.enabled

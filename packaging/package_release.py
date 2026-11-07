@@ -20,7 +20,7 @@ manifest = root / 'update.json'
 manifest.write_text(json.dumps({'format': 1, 'version': __version__, 'data_format': DATA_FORMAT,
     'exe_sha256': hashlib.sha256((root / 'Исследования пациентов.exe').read_bytes()).hexdigest()}, indent=2), encoding='utf8')
 files.append(manifest)
-for name in ('USER_GUIDE.md','CODEX_INSTALL.md','SUPPORTED_FORMS.md','PRIVACY.md','TELEMETRY.md','Краткая инструкция.pdf','guide.html'):
+for name in ('USER_GUIDE.md','CODEX_INSTALL.md','SUPPORTED_FORMS.md','PRIVACY.md','TELEMETRY.md','TELEMETRY_VERIFICATION.md','Краткая инструкция.pdf','guide.html'):
     path = root / 'docs' / name
     if not path.is_file():
         raise SystemExit(f'Missing release documentation: {name}')

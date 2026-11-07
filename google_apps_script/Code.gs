@@ -83,7 +83,7 @@ const WIRE_SCHEMA = {
     ]
   },
   "minAttempts": 10,
-  "pathInfo": "v1/counters",
+  "pathInfo": "",
   "schemaVersion": 1,
   "versions": [
     "2.4.0"
@@ -121,7 +121,7 @@ function doPost(event) {
 }
 
 function doGet(event) {
-  return reply_(Boolean(event && event.pathInfo === 'healthz' && emptyQuery_(event)));
+  return reply_(baseRoute_(event));
 }
 
 function reply_(ok) {
@@ -129,8 +129,10 @@ function reply_(ok) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
-function emptyQuery_(event) {
-  return event.queryString === null || event.queryString === '';
+function baseRoute_(event) {
+  return Boolean(event
+    && (event.pathInfo === undefined || event.pathInfo === null || event.pathInfo === WIRE_SCHEMA.pathInfo)
+    && (event.queryString === null || event.queryString === ''));
 }
 
 function isObject_(value) {
@@ -154,7 +156,7 @@ function validVersions_() {
 }
 
 function parseReport_(event) {
-  if (!validVersions_() || !event || event.pathInfo !== WIRE_SCHEMA.pathInfo || !emptyQuery_(event)) return null;
+  if (!validVersions_() || !baseRoute_(event)) return null;
   const data = event.postData;
   if (!data || typeof data.type !== 'string' || !CONTENT_TYPE.test(data.type)
       || !Number.isInteger(event.contentLength) || event.contentLength !== data.length
