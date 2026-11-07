@@ -22,8 +22,12 @@ for language in ['rus','eng']:
 subprocess.run([sys.executable,'-m','PyInstaller','--noconfirm','--clean','--onefile','--windowed',
                 '--name','Исследования пациентов','--add-data',str(root/'vendor')+';vendor',
                 '--collect-all','pypdfium2','--collect-all','pypdfium2_raw',str(root/'app.py')],cwd=root,check=True)
-(root/'dist'/'Инструкция.txt').write_text((root/'README.md').read_text(encoding='utf-8').split('## Проверка и сборка')[0],encoding='utf-8-sig')
+(root/'dist'/'Инструкция.txt').write_text((root/'docs'/'USER_GUIDE.md').read_text(encoding='utf-8'),encoding='utf-8-sig')
+docs_target=root/'dist'/'docs';docs_target.mkdir(exist_ok=True)
+for name in ['USER_GUIDE.md','CODEX_INSTALL.md','SUPPORTED_FORMS.md','PRIVACY.md']:
+    shutil.copy2(root/'docs'/name,docs_target/name)
 license_root=root/'dist'/'Лицензии';license_root.mkdir(exist_ok=True)
+shutil.copy2(root/'LICENSE',license_root/'PatientStudyImporter-MIT.txt')
 packages=['pypdf','openpyxl','python-docx','Pillow','pypdfium2','portalocker','lxml','et-xmlfile','typing_extensions']
 versions={}
 for package in packages:

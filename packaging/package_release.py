@@ -12,6 +12,11 @@ licenses = root / 'Лицензии'
 if not licenses.is_dir() or any(not path.is_file() for path in files):
     raise SystemExit('Missing release files or license directory')
 files += sorted(path for path in licenses.rglob('*') if path.is_file())
+for name in ('USER_GUIDE.md','CODEX_INSTALL.md','SUPPORTED_FORMS.md','PRIVACY.md'):
+    path = root / 'docs' / name
+    if not path.is_file():
+        raise SystemExit(f'Missing release documentation: {name}')
+    files.append(path)
 archive = root / 'PatientStudyImporter-Windows.zip'
 with ZipFile(archive, 'w', ZIP_DEFLATED) as output:
     for path in files:

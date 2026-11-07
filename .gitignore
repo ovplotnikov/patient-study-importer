@@ -12,3 +12,28 @@ vendor/
 *.docx
 *.traineddata
 local-*
+.env
+.env.*
+*.pem
+*.key
+*.log
+*.zip
+*.7z
+*.exe
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff
+*.bmp
+*.xls
+*.doc
+*.csv
+Данные/
+База/
+Входящие/
+Обработано/
+Нужно уточнить/
+Дубли/
+Ошибки/
+Резервные копии/

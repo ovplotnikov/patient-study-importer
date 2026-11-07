@@ -1,8 +1,10 @@
 name: Build and verify Windows application
 on:
+  pull_request:
   push:
     branches: [main]
     tags: ['v*']
+    paths-ignore: ['docs/PUBLICATION_AUDIT.md']
   workflow_dispatch:
 jobs:
   windows:
@@ -73,7 +75,7 @@ jobs:
           path: dist
       - name: Package release archive
         run: python3 packaging/package_release.py dist
-      - name: Publish private release
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
