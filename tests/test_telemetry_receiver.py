@@ -1,5 +1,5 @@
 """Real loopback HTTP requests with synthetic diagnostics only."""
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import closing, redirect_stderr, redirect_stdout
 from http.client import HTTPConnection
 import io
 import json
@@ -72,14 +72,14 @@ class ReceiverTests(unittest.TestCase):
         return int(result.split(b' ', 2)[1])
 
     def rows(self):
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection:
             return connection.execute('SELECT * FROM counters ORDER BY app_version, metric, code').fetchall()
 
     def test_aggregate_totals_only(self):
         self.assertEqual(self.send(json.dumps(self.report())), (204, b''))
         self.assertEqual(self.send(json.dumps(self.report(count=12)), content_type='application/json; charset=UTF-8'), (204, b''))
         self.assertEqual(self.rows(), [('2.4.0', 'formats', 'pdf', 22), ('2.4.0', 'outcomes', 'saved', 22)])
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection:
             columns = [row[1] for row in connection.execute('PRAGMA table_info(counters)')]
             tables = connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         self.assertEqual(columns, ['app_version', 'metric', 'code', 'total'])
