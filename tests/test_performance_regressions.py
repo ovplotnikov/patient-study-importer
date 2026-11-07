@@ -167,11 +167,13 @@ class StorageRegressionTests(unittest.TestCase):
         finally:
             book.close()
         copy = SAMPLE.replace('Пациент: ', 'Пациент:  ')
-        (incoming / 'вариант.txt').write_text(copy, encoding='utf-8')
+        source = incoming / 'вариант.txt'
+        source.write_text(copy, encoding='utf-8')
+        digest = sha256(source.read_bytes()).hexdigest()
         second = self.workspace.import_folder()
         self.assertEqual((second['documents'], second['duplicates']), (1, 1))
         original = Path(document['original'])
-        variant = next(self.workspace.originals.glob(sha256(copy.encode()).hexdigest() + '.*'))
+        variant = next(self.workspace.originals.glob(digest + '.*'))
         book = load_workbook(target)
         try:
             sheet = book['Показатели']
