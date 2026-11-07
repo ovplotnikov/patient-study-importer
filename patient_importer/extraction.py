@@ -1,21 +1,27 @@
 """Offline document readers and bundled OCR."""
-from pathlib import Path
+from dataclasses import asdict, replace
 from functools import lru_cache
-import csv
+from pathlib import Path
+from xml.etree import ElementTree
 import io
 import json
 import os
 import re
-import statistics
 import subprocess
 import sys
 import tempfile
 import zipfile
 
 from docx import Document
+from PIL import Image, ImageOps, ImageSequence
 from pypdf import PdfReader
 
+from .ocr import Line, Page, open_rapid_engine, rapid_page, same_reading, tesseract_page
+
 SUPPORTED = {'.pdf', '.docx', '.txt', '.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'}
+RASTER_SUFFIXES = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp', '.gif', '.webp', '.jp2'}
+PDF_RENDER_SCALE = 300 / 72
+MAX_RENDER_PIXELS = 18_000_000
 
 
 def resource_path(name):
@@ -30,147 +36,263 @@ def supported(path):
         return handle.read(5) == b'%PDF-'
 
 
-def recognize_images(images):
-    executable = resource_path('tesseract/tesseract.exe' if os.name == 'nt' else 'tesseract/tesseract')
-    if not executable.exists():
-        raise RuntimeError('В комплекте программы отсутствует модуль распознавания сканов')
-    output = []
-    for image in images:
-        with tempfile.TemporaryDirectory(prefix='patient-ocr-') as directory:
-            source = Path(directory)/'page.png'
-            image.save(source)
-            command = [str(executable), str(source), 'stdout', '--tessdata-dir', str(executable.parent/'tessdata'), '-l', 'rus+eng', '--psm', '3', '-c', 'tessedit_create_tsv=1']
-            process = subprocess.run(command, capture_output=True, timeout=180, creationflags=0x08000000 if os.name=='nt' else 0)
-            if process.returncode:
-                raise RuntimeError('Не удалось распознать страницу скана')
-            # Rebuild columns from coordinates, retaining evidence for table parsing.
-            words = []
-            for row in csv.DictReader(io.StringIO(process.stdout.decode('utf-8','replace')),delimiter='\t'):
-                if row.get('level')!='5' or not row.get('text','').strip():
-                    continue
-                words.append(row)
-            lines=[]
-            for word in sorted(words,key=lambda w:int(w['top'])+int(w['height'])/2):
-                center=int(word['top'])+int(word['height'])/2
-                nearest=min(lines,key=lambda line:abs(line['center']-center)) if lines else None
-                if nearest and abs(nearest['center']-center)<=max(3,int(word['height'])*.45):nearest['words'].append(word)
-                else:lines.append({'center':center,'words':[word]})
-            rendered = []
-            scale=max(2,statistics.median(int(w['width'])/max(1,len(w['text'])) for w in words)) if words else 8
-            for line in lines:
-                words=line['words']
-                text = '';previous_right=None
-                for word in sorted(words,key=lambda w:int(w['left'])):
-                    left=int(word['left'])
-                    gap=left if previous_right is None else left-previous_right
-                    spaces=max(0,round(gap/scale)) if previous_right is None else (1 if gap<scale*1.5 else max(2,round(gap/scale)))
-                    text+=' '*spaces+word['text']
-                    previous_right=left+int(word['width'])
-                rendered.append(text)
-            output.append('\n'.join(rendered))
-    return output
-
-
 def native_mac_ocr(path):
-    executable=resource_path('mac-helper')
+    executable = resource_path('mac-helper')
     if not executable.exists():
         raise RuntimeError('В комплекте программы отсутствует модуль OCR')
-    process=subprocess.run([str(executable),str(path)],capture_output=True,text=True,timeout=180)
+    process = subprocess.run([str(executable), str(path)], capture_output=True, text=True, timeout=180)
     if process.returncode:
         raise RuntimeError('Не удалось распознать документ')
     return json.loads(process.stdout)
 
 
-@lru_cache(maxsize=128)
+def text_only_page(text, engine, image_size=None):
+    return Page(text, tuple(Line(line, None, None) for line in text.splitlines()), engine, image_size)
+
+
+@lru_cache(maxsize=1)
+def rapid_engine(model_dir):
+    return open_rapid_engine(model_dir)
+
+
+def recognize_image(image):
+    image = ImageOps.exif_transpose(image).convert('RGB')
+    model_dir = resource_path('rapidocr')
+    executable = resource_path('tesseract/tesseract.exe' if os.name == 'nt' else 'tesseract/tesseract')
+    paddle = None
+    tesseract = None
+    unavailable = []
+    if model_dir.is_dir() or (os.name == 'nt' and getattr(sys, 'frozen', False)):
+        try:
+            paddle = rapid_page(image, rapid_engine(model_dir), improve_geometry=True)
+        except Exception:
+            unavailable.append('PaddleOCR')
+    if executable.exists():
+        try:
+            tesseract = tesseract_page(image, executable, executable.parent / 'tessdata',
+                                       'tesseract-fast')
+        except RuntimeError:
+            unavailable.append('Tesseract')
+    elif os.name == 'nt' and getattr(sys, 'frozen', False):
+        unavailable.append('Tesseract')
+    if paddle and paddle.text.strip():
+        alternatives = (tesseract,) if tesseract and not same_reading(paddle, tesseract) else ()
+        return replace(paddle, alternatives=alternatives, unavailable=tuple(unavailable),
+                       verification_engine=tesseract.engine if tesseract is not None else None)
+    if tesseract is not None:
+        alternatives = (paddle,) if paddle and not same_reading(tesseract, paddle) else ()
+        return replace(tesseract, alternatives=alternatives, unavailable=tuple(unavailable))
+    if paddle is not None:
+        return replace(paddle, unavailable=tuple(unavailable))
+    if sys.platform == 'darwin' and not executable.exists():
+        with tempfile.TemporaryDirectory(prefix='patient-ocr-') as directory:
+            source = Path(directory) / 'page.png'
+            image.save(source)
+            return text_only_page(native_mac_ocr(source)[0], 'apple-vision', image.size)
+    raise RuntimeError('Не удалось распознать страницу скана')
+
 def recognize_embedded(data):
-    from PIL import Image
-    image=Image.open(io.BytesIO(data)).convert('RGB')
-    if sys.platform=='darwin' and not resource_path('tesseract/tesseract').exists():
-        with tempfile.TemporaryDirectory(prefix='patient-insert-') as directory:
-            source=Path(directory)/'image.png';image.save(source)
-            return native_mac_ocr(source)[0]
-    return recognize_images([image])[0]
+    with Image.open(io.BytesIO(data)) as image:
+        return recognize_image(image)
+
+
+def issue(result, code, message, page=None):
+    item = {'code': code, 'message': message, 'severity': 'review'}
+    if page is not None:
+        item['page'] = page
+    if item not in result['extraction_issues']:
+        result['extraction_issues'].append(item)
+
+
+def new_result(format_name, pages=()):
+    return {'pages': list(pages), 'page_numbers': list(range(1, len(pages)+1)),
+            'native_pages': list(pages), 'ocr_pages': [], 'format': format_name,
+            'ocr_evidence': [], 'ocr_alternatives': [], 'extraction_issues': []}
+
+
+def add_recognition(result, recognized, page, *, replace=None, source='page', image_index=None, evidence_only=False):
+    # Text-only adapters can still supply review evidence without fake confidence.
+    if isinstance(recognized, str):
+        recognized = text_only_page(recognized, 'text-only-ocr')
+    if evidence_only:
+        index = page
+    elif replace is None:
+        result['pages'].append(recognized.text)
+        result['page_numbers'].append(page)
+        index = len(result['pages'])
+    else:
+        result['pages'][replace] = recognized.text
+        index = replace + 1
+    if not evidence_only:
+        result['ocr_pages'].append(index)
+    for line_number, line in enumerate(recognized.lines, 1):
+        result['ocr_evidence'].append({
+            **asdict(line), 'page': page, 'page_index': index, 'line': line_number,
+            'engine': recognized.engine, 'image_size': recognized.image_size,
+            'verification_engine': recognized.verification_engine,
+            'source_kind': source, 'source_index': image_index,
+        })
+    issue(result, 'OCR_USED', 'Сверьте распознанные со скана данные с оригиналом', page)
+    for alternate in recognized.alternatives:
+        result['ocr_alternatives'].append({
+            'page': page, 'page_index': index, 'source_kind': source,
+            'source_index': image_index, 'engine': alternate.engine, 'text': alternate.text,
+            'image_size': alternate.image_size, 'lines': [asdict(line) for line in alternate.lines],
+        })
+    if recognized.alternatives:
+        issue(result, 'OCR_DISAGREEMENT', 'Два распознавания дали разные результаты. Сверьте значения и единицы с оригиналом', page)
+    if recognized.unavailable:
+        issue(result, 'OCR_ENGINE_UNAVAILABLE', 'Не удалось выполнить оба прохода OCR', page)
+    if any(line.confidence is not None and line.confidence < .55 for line in recognized.lines):
+        issue(result, 'OCR_LOW_CONFIDENCE', 'На скане есть неуверенно распознанные строки', page)
+    if not recognized.text.strip():
+        issue(result, 'OCR_EMPTY', 'В изображении не найден читаемый текст', page)
+
+
+def pdf_pages(path):
+    reader = PdfReader(path)
+    if reader.is_encrypted and not reader.decrypt(''):
+        raise ValueError('PDF защищён паролем')
+    pages = []
+    failed = set()
+    for i, page in enumerate(reader.pages, 1):
+        try:
+            pages.append(page.extract_text(extraction_mode='layout'))
+        except Exception:
+            pages.append('')
+            failed.add(i)
+    result = new_result('PDF', pages)
+    for page in sorted(failed):
+        issue(result, 'PDF_TEXT_UNREADABLE', 'Не удалось прочитать текстовый слой PDF', page)
+    targets = set()
+    embedded_keys = {}
+    for i, page in enumerate(reader.pages, 1):
+        try:
+            embedded_keys[i] = list(page.images.keys())
+        except Exception:
+            issue(result, 'EMBEDDED_IMAGE_UNREADABLE', 'Не удалось прочитать список изображений PDF', i)
+            embedded_keys[i] = []
+            targets.add(i)
+        if i in failed or embedded_keys[i] and len(pages[i-1].strip()) < 20:
+            targets.add(i)
+        elif len(pages[i-1].strip()) < 20:
+            # Vector outlines and some damaged text layers have no image object.
+            try:
+                has_content = page.get_contents() is not None
+            except Exception:
+                has_content = True
+            if has_content:
+                targets.add(i)
+            else:
+                issue(result, 'PDF_PAGE_EMPTY', 'Страница PDF не содержит читаемого текста', i)
+    if targets:
+        import pypdfium2 as pdfium
+        pdf = pdfium.PdfDocument(path)
+        try:
+            for i in sorted(targets):
+                try:
+                    pdf_page = pdf[i-1]
+                    try:
+                        width, height = pdf_page.get_size()
+                        scale = min(PDF_RENDER_SCALE, (MAX_RENDER_PIXELS / (width * height)) ** .5)
+                        bitmap = pdf_page.render(scale=scale)
+                        try:
+                            image = bitmap.to_pil().copy()
+                        finally:
+                            bitmap.close()
+                    finally:
+                        pdf_page.close()
+                    add_recognition(result, recognize_image(image), i, replace=i-1)
+                except Exception:
+                    issue(result, 'OCR_FAILED', 'Не удалось распознать страницу PDF', i)
+        finally:
+            pdf.close()
+    for i, page in enumerate(reader.pages, 1):
+        if i in targets:
+            continue
+        seen = set()
+        for j, key in enumerate(embedded_keys[i], 1):
+            try:
+                data = page.images[key].data
+                if data in seen:
+                    continue
+                seen.add(data)
+                recognized = recognize_embedded(data)
+            except Exception:
+                issue(result, 'EMBEDDED_IMAGE_UNREADABLE', 'Не удалось прочитать вложенное изображение PDF', i)
+                continue
+            text = recognized if isinstance(recognized, str) else recognized.text
+            # Exclude recognizable signature stamps from field parsing, with a visible review reason.
+            if re.search(r'сертификат|документ.{0,25}подписан|электронн.{0,15}подпис', text, re.I | re.S) and not re.search(
+                    r'креатинин|паренхим|гемоглобин|лейкоцит|эритроцит|почка|почки', text, re.I):
+                issue(result, 'SIGNATURE_IMAGE', 'На странице есть изображение электронной подписи. Проверьте, что результаты находятся в основной части бланка', i)
+                continue
+            normalized = ' '.join(text.split())
+            matches_native = bool(normalized and normalized in ' '.join(pages[i-1].split()))
+            add_recognition(result, recognized, i, source='embedded', image_index=j,
+                            evidence_only=matches_native)
+    return result
+
+
+def docx_pages(path):
+    document = Document(path)
+    blocks = []
+    for item in document.iter_inner_content():
+        if hasattr(item, 'rows'):
+            blocks.extend('  '.join(cell.text for cell in row.cells) for row in item.rows)
+        else:
+            blocks.append(item.text)
+    result = new_result('DOCX', ['\n'.join(blocks)])
+    if document.element.xpath('.//w:txbxContent | .//w:object | .//w:altChunk | .//w:sdt | .//w:tbl//w:tbl'):
+        issue(result, 'DOCX_COMPLEX_CONTENT', 'В документе Word есть текстовые блоки или объекты. Проверьте их в оригинале')
+    with zipfile.ZipFile(path) as archive:
+        for name in archive.namelist():
+            if not re.fullmatch(r'word/(?:header\d+|footer\d+|footnotes|endnotes)\.xml', name):
+                continue
+            try:
+                tree = ElementTree.fromstring(archive.read(name))
+                word_ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+                has_text = any((part.text or '').strip() for part in tree.iter(f'{{{word_ns}}}t'))
+            except (ElementTree.ParseError, OSError, zipfile.BadZipFile):
+                has_text = True
+            if has_text:
+                issue(result, 'DOCX_EXTRA_TEXT', 'Проверьте текст в колонтитулах и сносках Word')
+        for j, name in enumerate((n for n in archive.namelist() if n.startswith('word/media/') and not n.endswith('/')), 1):
+            if Path(name).suffix.lower() not in RASTER_SUFFIXES:
+                issue(result, 'EMBEDDED_IMAGE_UNSUPPORTED', 'Формат вложенного изображения Word не поддерживается')
+                continue
+            try:
+                with Image.open(io.BytesIO(archive.read(name))) as image:
+                    for frame in ImageSequence.Iterator(image):
+                        add_recognition(result, recognize_image(frame), 1,
+                                        source='embedded', image_index=j)
+            except Exception:
+                issue(result, 'EMBEDDED_IMAGE_UNREADABLE', 'Не удалось прочитать вложенное изображение Word')
+    return result
 
 
 def extract(path):
+    path = Path(path)
     with path.open('rb') as handle:
-        is_pdf=handle.read(5)==b'%PDF-'
+        is_pdf = handle.read(5) == b'%PDF-'
     if is_pdf:
-        reader=PdfReader(path)
-        if reader.is_encrypted and not reader.decrypt(''):
-            raise ValueError('PDF защищён паролем')
-        pages=[page.extract_text(extraction_mode='layout') for page in reader.pages]
-        native_pages=list(pages)
-        # A genuinely empty PDF page must not turn the whole document into OCR.
-        targets=[i for i,page in enumerate(reader.pages) if len(pages[i].strip())<20 and len(page.images)>0]
-        if targets:
-            if sys.platform=='darwin' and not resource_path('tesseract/tesseract').exists():
-                recognized=native_mac_ocr(path)
-                for i in targets:
-                    pages[i]=recognized[i]
-            else:
-                import pypdfium2 as pdfium
-                pdf=pdfium.PdfDocument(path)
-                try:
-                    images=[pdf[i].render(scale=2.5).to_pil() for i in targets]
-                    for i,text in zip(targets,recognize_images(images)):
-                        pages[i]=text
-                finally:
-                    pdf.close()
-        ocr_pages={i+1 for i in targets}
-        page_numbers=list(range(1,len(pages)+1))
-        for i,page in enumerate(reader.pages):
-            if i in targets:continue
-            seen=set()
-            for embedded in page.images:
-                image=embedded.image
-                if image.width<400 or image.height<150:continue
-                if embedded.data in seen:continue
-                seen.add(embedded.data)
-                text=recognize_embedded(embedded.data).strip()
-                # Signature stamps carry certificate metadata, not study results.
-                if re.search(r'сертификат|документ.{0,25}подписан|электронн.{0,15}подпис',text,re.I|re.S) and not re.search(r'креатинин|паренхим|гемоглобин|лейкоцит|эритроцит|почка|почки',text,re.I):continue
-                normalized=lambda value:' '.join(value.lower().split())
-                if text and normalized(text) not in normalized(pages[i]):
-                    pages.append(text);page_numbers.append(i+1)
-                    ocr_pages.add(len(pages))
-        return {'pages':pages,'page_numbers':page_numbers,'native_pages':native_pages,'ocr_pages':sorted(ocr_pages),'format':'PDF'}
-    if path.suffix.lower()=='.docx':
-        document=Document(path)
-        blocks=[]
-        for item in document.iter_inner_content():
-            if hasattr(item,'rows'):
-                blocks.extend('  '.join(cell.text for cell in row.cells) for row in item.rows)
-            else:
-                blocks.append(item.text)
-        pages=['\n'.join(blocks)]
-        ocr_pages=[]
-        # Embedded scans are part of the document, even if the DOCX also has text.
-        with zipfile.ZipFile(path) as archive:
-            media=[name for name in archive.namelist() if name.startswith('word/media/') and Path(name).suffix.lower() in {'.png','.jpg','.jpeg','.tif','.tiff','.bmp'}]
-            for name in media:
-                from PIL import Image
-                image=Image.open(io.BytesIO(archive.read(name)))
-                if image.width<400 or image.height<200:
-                    continue
-                with tempfile.TemporaryDirectory(prefix='patient-docx-') as directory:
-                    source=Path(directory)/'scan.png';image.save(source)
-                    text=recognize_embedded(source.read_bytes())
-                pages.append(text);ocr_pages.append(len(pages))
-        return {'pages':pages,'ocr_pages':ocr_pages,'format':'DOCX'}
-    if path.suffix.lower()=='.txt':
-        raw=path.read_bytes()
-        for encoding in ['utf-8-sig','utf-16','cp1251']:
+        return pdf_pages(path)
+    if path.suffix.lower() == '.docx':
+        return docx_pages(path)
+    if path.suffix.lower() == '.txt':
+        raw = path.read_bytes()
+        for encoding in ['utf-8-sig', 'utf-16', 'cp1251']:
             try:
-                text=raw.decode(encoding)
-                return {'pages':[text],'ocr_pages':[],'format':'TXT'}
+                return new_result('TXT', [raw.decode(encoding)])
             except UnicodeError:
                 continue
         raise ValueError('Не удалось прочитать кодировку TXT')
-    if sys.platform=='darwin' and not resource_path('tesseract/tesseract').exists():
-        pages=native_mac_ocr(path)
-    else:
-        from PIL import Image, ImageSequence, ImageOps
-        with Image.open(path) as image:
-            pages=recognize_images([ImageOps.exif_transpose(frame.copy()).convert('RGB') for frame in ImageSequence.Iterator(image)])
-    return {'pages':pages,'ocr_pages':list(range(1,len(pages)+1)),'format':'Изображение'}
+    result = new_result('Изображение')
+    with Image.open(path) as image:
+        for i, frame in enumerate(ImageSequence.Iterator(image), 1):
+            try:
+                add_recognition(result, recognize_image(frame), i, source='image')
+            except RuntimeError:
+                add_recognition(result, text_only_page('', 'ocr-failed'), i, source='image')
+                issue(result, 'OCR_FAILED', 'Не удалось распознать изображение', i)
+    return result

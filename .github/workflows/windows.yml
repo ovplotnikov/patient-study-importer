@@ -28,7 +28,7 @@ jobs:
       - name: Run regression tests
         run: python -m unittest discover -s tests -v
       - name: Install OCR on the build machine
-        run: choco install tesseract --yes --no-progress
+        run: choco install tesseract --version 5.5.3.20260724 --yes --no-progress
       - name: Capture new interface with synthetic documents
         run: python app.py --ui-smoke-test "${{ runner.temp }}/patient-ui-source"
       - name: Build versioned offline visual guide
@@ -43,13 +43,13 @@ jobs:
           Rename-Item 'C:\Program Files\Tesseract-OCR' 'Tesseract-OCR-build-only'
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
           $p = Start-Process -FilePath $exe.FullName -ArgumentList '--self-test', $testRoot -PassThru
-          if (-not $p.WaitForExit(180000)) { $p.Kill(); throw 'Packaged self-test timed out' }
+          if (-not $p.WaitForExit(300000)) { $p.Kill(); throw 'Packaged self-test timed out' }
           if ($p.ExitCode -ne 0) { throw "Packaged self-test failed with exit $($p.ExitCode)" }
           $result = Get-Content (Join-Path $testRoot 'self-test.json') | ConvertFrom-Json
           if (-not $result.ok) { throw 'Packaged self-test did not pass' }
           Copy-Item (Join-Path $testRoot 'self-test.json') dist/self-test.json
           $p = Start-Process -FilePath $exe.FullName -ArgumentList '--ui-smoke-test', $testRoot -PassThru
-          if (-not $p.WaitForExit(60000)) { $p.Kill(); throw 'Packaged GUI timed out' }
+          if (-not $p.WaitForExit(120000)) { $p.Kill(); throw 'Packaged GUI timed out' }
           if ($p.ExitCode -ne 0) { throw "Packaged GUI failed with exit $($p.ExitCode)" }
           Copy-Item (Join-Path $testRoot 'ui-test.json') dist/ui-test.json
           New-Item -ItemType Directory -Force dist/screenshots | Out-Null

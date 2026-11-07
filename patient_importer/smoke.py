@@ -53,21 +53,52 @@ def smoke_test(root):
     assert len(pending)==1
     workspace.assign(pending[0]['id'],'ТЕСТОВ ТЕСТ ТЕСТОВИЧ','2000-01-01')
     assert workspace.summary()['review']==0
+    assert workspace.summary()['quality_review']==1
+    assert (workspace.root/'Нужно уточнить'/'без ФИО.txt').exists()
+    workspace.confirm_quality(pending[0]['id'],note='Тестовое заключение сверено; в оригинале нет даты и вида.')
+    assert workspace.summary()['total_review']==0
     assert (workspace.root/'Обработано'/'без ФИО.txt').exists()
     assert not (workspace.root/'Нужно уточнить'/'без ФИО.txt').exists()
-    from PIL import Image,ImageDraw,ImageFont
+    smoke_ocr(root)
+    return {'ok':True,'checks':['first_import','archive_move','byte_duplicate','incremental_patient','notes_preserved','custom_sheet_preserved','review_confirmation','separate_quality_confirmation','review_move','bundled_ocr','bundled_pdf_rendering','mixed_pdf_ocr'],'summary':workspace.summary()}
+
+
+def smoke_ocr(root):
+    """Use real packaged engines on image, scanned PDF, and mixed PDF."""
+    import os
+    import sys
+    from PIL import Image, ImageDraw, ImageFont
     from .extraction import extract
-    image=Image.new('RGB',(1200,260),'white')
-    font_path=Path('C:/Windows/Fonts/arial.ttf') if __import__('os').name=='nt' else Path('/System/Library/Fonts/Supplemental/Arial.ttf')
-    font=ImageFont.truetype(str(font_path),42)
-    ImageDraw.Draw(image).text((40,35),'TEST 12345\nДАТА РОЖДЕНИЯ 01.01.2000',font=font,fill='black',spacing=30)
-    image_path=root/'ocr-test.png';image.save(image_path)
-    recognized=' '.join(extract(image_path)['pages'])
-    assert '12345' in recognized and '2000' in recognized,recognized
-    pdf_path=root/'ocr-test.pdf';image.save(pdf_path,'PDF')
-    recognized=' '.join(extract(pdf_path)['pages'])
-    assert '12345' in recognized and '2000' in recognized,recognized
-    mixed_path=root/'ocr-mixed.pdf';make_mixed_pdf(pdf_path,mixed_path)
-    mixed=extract(mixed_path)
-    assert '12345' in ' '.join(mixed['pages']) and mixed['ocr_pages'],mixed
-    return {'ok':True,'checks':['first_import','archive_move','byte_duplicate','incremental_patient','notes_preserved','custom_sheet_preserved','review_confirmation','review_move','bundled_ocr','bundled_pdf_rendering','mixed_pdf_ocr'],'summary':workspace.summary()}
+
+    image = Image.new('RGB', (1200, 450), 'white')
+    font_path = (Path('C:/Windows/Fonts/arial.ttf') if os.name == 'nt'
+                 else Path('/System/Library/Fonts/Supplemental/Arial.ttf'))
+    font = ImageFont.truetype(str(font_path), 42)
+    text = ('Пациент: ТЕСТОВ ТЕСТ ТЕСТОВИЧ',
+            'Дата рождения: 01.01.2000',
+            'Креатинин 71,5 мкмоль/л',
+            'Глюкоза <0,50 ммоль/л')
+    draw = ImageDraw.Draw(image)
+    for index, line in enumerate(text):
+        draw.text((40, 35 + index * 83), line, font=font, fill='black')
+    image_path = root/'ocr-test.png'
+    image.save(image_path)
+    pdf_path = root/'ocr-test.pdf'
+    image.save(pdf_path, 'PDF', resolution=180)
+    mixed_path = root/'ocr-mixed.pdf'
+    make_mixed_pdf(pdf_path, mixed_path)
+    for path in (image_path, pdf_path, mixed_path):
+        data = extract(path)
+        recognized = ' '.join(' '.join(data['pages']).casefold().split())
+        assert all(line.casefold() in recognized for line in text), (path.name, recognized)
+        assert data['ocr_pages'], path.name
+        assert 'OCR_USED' in {item['code'] for item in data['extraction_issues']}, path.name
+        if os.name == 'nt' and getattr(sys, 'frozen', False):
+            assert data['ocr_evidence'], path.name
+            for item in data['ocr_evidence']:
+                assert item['engine'] == 'paddle-cyrillic' and item['verification_engine'] == 'tesseract-fast', item
+                assert item['bbox'] and item['image_size'], item
+            assert 'OCR_ENGINE_UNAVAILABLE' not in {item['code'] for item in data['extraction_issues']}
+        if path == mixed_path:
+            assert data['page_numbers'] == [1, 1], data['page_numbers']
+            assert 'Synthetic cover text' in data['native_pages'][0], data['native_pages']

@@ -12,8 +12,6 @@ from patient_importer import analysis,extraction
 from patient_importer.smoke import SAMPLE,smoke_test,make_mixed_pdf
 from patient_importer.storage import Workspace,sha256
 
-ORIGINAL_EXTRACT=extraction.extract
-
 
 class EngineTests(unittest.TestCase):
     def setUp(self):
@@ -27,13 +25,8 @@ class EngineTests(unittest.TestCase):
 
     def test_end_to_end(self):
         # OCR itself runs separately against the packaged executable and bundled engine.
-        with patch('patient_importer.extraction.extract',side_effect=self.extract_with_test_image):
+        with patch('patient_importer.smoke.smoke_ocr'):
             self.assertTrue(smoke_test(self.root/'smoke')['ok'])
-
-    @staticmethod
-    def extract_with_test_image(path):
-        if path.name in {'ocr-test.png','ocr-test.pdf','ocr-mixed.pdf'}:return {'pages':['TEST 12345 01.01.2000'],'ocr_pages':[1],'format':'image'}
-        return ORIGINAL_EXTRACT(path)
 
     def test_export_failure_keeps_source_and_retry_deduplicates(self):
         path=self.sample()
