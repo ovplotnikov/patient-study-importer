@@ -12,6 +12,7 @@ from patient_importer.telemetry_schema import (
 ROOT = Path(__file__).resolve().parents[1] / 'google_apps_script'
 NODE = shutil.which('node')
 VERSION = '2.4.0'
+NEXT_VERSION = '2.4.1'
 MARKER = 'SYNTHETIC_PRIVATE_MARKER'
 ID = 'SyntheticSheetId_a1b2c3d4e5f6'
 HEADER = ['app_version', 'metric', 'code', 'total']
@@ -216,7 +217,7 @@ class AppsScriptTests(unittest.TestCase):
             'maxReportBytes': MAX_REPORT_BYTES,
             'maxCount': MAX_COUNT,
             'minAttempts': MIN_ATTEMPTS,
-            'versions': [VERSION],
+            'versions': [VERSION, NEXT_VERSION],
             'metrics': {key: sorted(codes) for key, codes in METRICS.items()},
         })
 
@@ -236,16 +237,17 @@ class AppsScriptTests(unittest.TestCase):
         header_cells = header_write['requests'][0]['updateCells']['rows'][0]['values']
         self.assertTrue(all(cell['userEnteredFormat']['textFormat']['bold'] for cell in header_cells))
 
-    def test_later_version_can_share_existing_grid_with_previous_version(self):
-        future = '2.5.0'
-        body = canonical({**report(), 'app_version': future})
-        result = self.run_script([post(body)], versions=[VERSION, future], rows=[
+    def test_previous_and_new_versions_share_the_existing_grid(self):
+        body = canonical({**report(), 'app_version': NEXT_VERSION})
+        result = self.run_script([post(body), post()], rows=[
             HEADER, [VERSION, 'formats', 'pdf', 12],
         ])
-        self.assertEqual(result['result'][0]['body'], '{"ok":true}')
+        self.assertEqual([reply['body'] for reply in result['result']], ['{"ok":true}'] * 2)
         self.assertEqual(result['reads'][0]['ranges'], ["'Счётчики'!A1:D1024"])
-        self.assertEqual(result['rows'], [HEADER, [VERSION, 'formats', 'pdf', 12],
-                                          [future, 'formats', 'pdf', 10], [future, 'outcomes', 'saved', 10]])
+        self.assertEqual(result['rows'], [
+            HEADER, [VERSION, 'formats', 'pdf', 22], [VERSION, 'outcomes', 'saved', 10],
+            [NEXT_VERSION, 'formats', 'pdf', 10], [NEXT_VERSION, 'outcomes', 'saved', 10],
+        ])
         self.assertEqual(result['created'], [])
 
     def test_posts_merge_totals_and_health_does_not_read_sheets(self):

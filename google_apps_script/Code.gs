@@ -86,7 +86,8 @@ const WIRE_SCHEMA = {
   "pathInfo": "",
   "schemaVersion": 1,
   "versions": [
-    "2.4.0"
+    "2.4.0",
+    "2.4.1"
   ]
 };
 
