@@ -72,6 +72,15 @@ def run(root):
     assert review.selected and review.candidates
     visible(review.confirm_button)
     capture('03-review.png',review.window)
+    # Exercise actual PDF rendering, multipage navigation and zoom in the review pane.
+    from pypdf import PdfWriter
+    preview=root/'preview.pdf';writer=PdfWriter()
+    writer.add_blank_page(width=595,height=842);writer.add_blank_page(width=595,height=842)
+    writer.write(preview)
+    review.show_preview({'original':str(preview)},{'pages':['Synthetic preview']});settle()
+    assert review.preview_document is not None and hasattr(review,'preview_photo')
+    review.turn_page(1);review.resize_preview(.25);settle()
+    assert review.page==1 and review.zoom==1.25
     review.use_candidate(*review.candidates[0]);review.confirm_button.invoke();settle()
     assert review.selected is None and not review.records
     assert str(review.confirm_button['state'])=='disabled'
@@ -95,12 +104,19 @@ def run(root):
     # Verify update offer is deferred and declining leaves data and workflow alone.
     offered=[];future=updater.Release('v99.0.0','','',1)
     with patch.object(messagebox,'askyesno',side_effect=lambda *a,**k:offered.append(True) or False):
-        app.pending_update=future;app.offer_update()
+        if os.name=='nt' and getattr(sys,'frozen',False):
+            with patch.object(updater,'check_for_update',return_value=future),patch.object(updater,'cleanup_cache'):
+                app.auto_update_check()
+                deadline=time.monotonic()+10
+                while not offered:
+                    settle();time.sleep(.05)
+                    assert time.monotonic()<deadline,'Startup update check did not offer update'
+        else:app.pending_update=future;app.offer_update()
     assert offered and not app.updating
     if getattr(sys,'frozen',False):
         from .help_view import help_path
         help_file=help_path();html=help_file.read_text(encoding='utf8')
         assert __version__ in html and 'data:image/png;base64,' in html
     app.root.destroy()
-    result={'ok':True,'checks':['empty_state','picker_or_native_drop_callback','external_originals_preserved','same_patient_incremental_import','per_file_results','small_window_buttons','visible_candidates','confirmation_clears_selection','repeat_confirmation_blocked','consistent_result_state','deduplication','actionable_errors','automatic_update_offer_decline','embedded_help' if getattr(sys,'frozen',False) else 'source_capture']}
+    result={'ok':True,'checks':['empty_state','picker_or_native_drop_callback','external_originals_preserved','same_patient_incremental_import','per_file_results','small_window_buttons','visible_candidates','pdf_preview_pages_zoom','confirmation_clears_selection','repeat_confirmation_blocked','consistent_result_state','deduplication','actionable_errors','automatic_update_offer_decline','embedded_help' if getattr(sys,'frozen',False) else 'source_capture']}
     (root/'ui-test.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf8')

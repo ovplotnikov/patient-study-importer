@@ -182,10 +182,10 @@ class Application:
 
     def stage(self,paths):
         if self.working:return
-        self.busy(True);self.phase.set('Добавляем файлы…')
+        self.cancel.clear();self.busy(True);self.phase.set('Добавляем файлы…')
         workspace=self.workspace
         def work():
-            try:self.events.put(('staged',intake.stage_files(workspace,paths,lambda name:self.events.put(('staging',name)))))
+            try:self.events.put(('staged',intake.stage_files(workspace,paths,lambda name:self.events.put(('staging',name)),self.cancel)))
             except Exception as exc:self.events.put(('error',str(exc)))
         self.worker=threading.Thread(target=work,daemon=False);self.worker.start()
 

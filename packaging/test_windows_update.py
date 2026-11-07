@@ -8,6 +8,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
+import zipfile
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -19,7 +21,16 @@ subprocess.run([sys.executable, str(root / 'packaging/package_release.py'), str(
 with tempfile.TemporaryDirectory(prefix='patient-update-ci-') as tmp:
     folder = Path(tmp)
     install = folder / 'Программа с пробелами';install.mkdir()
-    target = install / u.EXE;shutil.copy2(exe, target)
+    target = install / u.EXE
+    # Test the actual updater already installed by users, not another copy of this build.
+    legacy_url='https://github.com/ovplotnikov/patient-study-importer/releases/download/v2.1.0/'
+    legacy=folder/'legacy.zip'
+    with urllib.request.urlopen(legacy_url+u.ARCHIVE,timeout=120) as response,legacy.open('wb') as output:
+        shutil.copyfileobj(response,output)
+    with urllib.request.urlopen(legacy_url+'PatientStudyImporter-Windows.sha256',timeout=30) as response:
+        expected=response.read().decode().split()[0]
+    assert u.digest(legacy)==expected,'Legacy release checksum mismatch'
+    with zipfile.ZipFile(legacy) as bundle:target.write_bytes(bundle.read(u.EXE))
     data = install / 'Данные';data.mkdir()
     (data / 'registry.sqlite').write_bytes(b'synthetic database, do not change')
     (data / 'notes.xlsx').write_bytes(b'synthetic workbook, do not change')
@@ -37,7 +48,7 @@ with tempfile.TemporaryDirectory(prefix='patient-update-ci-') as tmp:
         while not (lock_dir/'ready').exists():
             assert old.poll() is None and time.monotonic()<deadline, 'Old program did not start'
             time.sleep(.2)
-        with patch.object(sys, 'executable', str(exe)):
+        with patch.object(sys, 'executable', str(target)):
             helper = u.launch_install(stage, target, test=True)
         deadline = time.monotonic()+90
         while not (stage/'probe.json').exists():

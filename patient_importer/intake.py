@@ -38,11 +38,12 @@ def collect(paths, workspace):
                 seen.add(candidate);yield candidate
 
 
-def stage_files(workspace, paths, progress=lambda name:None):
+def stage_files(workspace, paths, progress=lambda name:None, cancel=None):
     result={'added':[], 'skipped':[], 'errors':[]}
     incoming=workspace.root/'Входящие'
     with workspace.lock():
         for source in collect(paths,workspace):
+            if cancel is not None and cancel.is_set():break
             progress(source.name)
             try:
                 if not supported(source):result['skipped'].append(source.name);continue
@@ -92,5 +93,11 @@ def retry_file(workspace, arrival_id):
             source.parent.mkdir(parents=True,exist_ok=True)
             shutil.copy2(archived,source)
         elif not source.is_file():raise ValueError('Файл не найден. Добавьте исходник ещё раз.')
-        # Keep the error record until import really succeeds.
+        # An edited replacement belongs to this retry, not a second unresolved
+        # error forever. The former bytes remain in the preserved original store.
+        digest=sha256(source)
+        if digest!=row['hash']:
+            existing=db.execute('SELECT id FROM arrivals WHERE source=? AND hash=?',(str(source),digest)).fetchone()
+            if existing:raise ValueError('Эта версия уже есть в очереди или архиве. Обработайте очередь.')
+            db.execute('UPDATE arrivals SET hash=? WHERE id=?',(digest,row['id']))
         return source
