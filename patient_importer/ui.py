@@ -1,5 +1,7 @@
 """Shared desktop presentation primitives and bundled library icons."""
 from pathlib import Path
+from queue import Empty, SimpleQueue
+from threading import Thread
 import tkinter as tk
 from tkinter import ttk
 from PIL import Image, ImageTk
@@ -7,6 +9,54 @@ from PIL import Image, ImageTk
 BLUE='#075bbe'; INK='#17212f'; MUTED='#586779'; LINE='#dbe2ea'; PALE='#eef5ff'
 FONT='Segoe UI'
 ASSETS=Path(__file__).resolve().parent/'assets'
+
+
+class WorkspaceActions:
+    """Run a single workspace operation while Tk remains in its event loop."""
+
+    def __init__(self, root, *, can_start=lambda: True, can_present=lambda: True, on_idle=lambda: None):
+        self.root = root
+        self.can_start = can_start
+        self.can_present = can_present
+        self.on_idle = on_idle
+        self.active = False
+        self.presenting = False
+
+    def run(self, work, completed):
+        if self.active or self.presenting or not self.can_start():
+            return False
+        result = SimpleQueue()
+
+        def execute():
+            try:
+                result.put((work(), None))
+            except Exception as error:
+                result.put((None, error))
+            except BaseException:
+                result.put((None, RuntimeError('Операция была прервана.')))
+
+        def poll():
+            try:
+                value, error = result.get_nowait()
+            except Empty:
+                self.root.after(30, poll)
+                return
+            self.active = False
+            self.presenting = True
+            try:
+                if self.can_present():
+                    completed(value, error)
+            finally:
+                self.presenting = False
+                self.on_idle()
+
+        self.active = True
+        try:
+            Thread(target=execute, daemon=False).start()
+        except RuntimeError as error:
+            result.put((None, error))
+        self.root.after(30, poll)
+        return True
 
 
 def setup(root):

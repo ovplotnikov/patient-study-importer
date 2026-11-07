@@ -14,14 +14,21 @@ import uuid
 import portalocker
 
 from . import analysis, extraction, quality
+from .telemetry_schema import MAX_COUNT, METRICS
 
 MANAGED={'Обработано','Нужно уточнить','Дубли','Ошибки','База','Резервные копии','Отложено'}
+# None is a captured absence of consent, not a request to capture it again.
+_CURRENT_EPOCH = object()
 DIAGNOSTIC_FORMATS = {
     '.pdf': 'pdf', '.docx': 'docx', '.txt': 'txt',
     '.png': 'image', '.jpg': 'image', '.jpeg': 'image', '.tif': 'image',
     '.tiff': 'image', '.bmp': 'image',
 }
 EXTRACTED_DIAGNOSTIC_FORMATS = {'PDF': 'pdf', 'DOCX': 'docx', 'TXT': 'txt', 'Изображение': 'image'}
+
+
+class ReviewCommittedError(RuntimeError):
+    """The registry decision was saved but finalization failed."""
 
 
 def sha256(path):
@@ -38,6 +45,7 @@ def now():
 class Workspace:
     def __init__(self, root, diagnostics=None):
         self.diagnostics = diagnostics
+        self._diagnostic_local = threading.local()
         self.root=Path(root).expanduser().resolve()
         self.root.mkdir(parents=True,exist_ok=True)
         for name in MANAGED|{'Входящие'}:(self.root/name).mkdir(exist_ok=True)
@@ -67,6 +75,7 @@ class Workspace:
             db.execute('INSERT OR IGNORE INTO meta VALUES (?,?)',('workspace',str(uuid.uuid4())))
             db.execute('INSERT OR IGNORE INTO meta VALUES (?,?)',('revision','0'))
         with self.lock(),self.connect() as db:
+            db.execute('CREATE INDEX IF NOT EXISTS arrivals_document_index ON arrivals(document_id)')
             previous=db.execute("SELECT value FROM meta WHERE key='root'").fetchone()
             if previous and previous[0]!=str(self.root):
                 old=previous[0].replace('\\','/').rstrip('/')+'/'
@@ -110,46 +119,76 @@ class Workspace:
     def touch(self,db):
         db.execute("UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='revision'")
 
-    def _diagnostic(self, metric, code, count=1):
+    def _diagnostic(self, metric, code, count=1, *, epoch=_CURRENT_EPOCH):
         """Only predefined labels cross from the registry to the optional sink."""
         if self.diagnostics is None:
             return
         try:
-            from .telemetry_schema import MAX_COUNT, METRICS
-            if (type(metric) is str and type(code) is str and code in METRICS.get(metric, ())
-                    and type(count) is int and 1 <= count <= MAX_COUNT):
-                self.diagnostics.record(metric, code, count)
+            if (type(metric) is not str or type(code) is not str or code not in METRICS.get(metric, ())
+                    or type(count) is not int or not 1 <= count <= MAX_COUNT):
+                return
+            if epoch is _CURRENT_EPOCH:
+                epoch = self._diagnostic_epoch()
+            if epoch is None:
+                return
+            pending = getattr(self._diagnostic_local, 'pending', None)
+            if pending is None:
+                self.diagnostics.record_batch({metric: {code: count}}, epoch=epoch)
+                return
+            bucket = pending.setdefault(epoch, {}).setdefault(metric, {})
+            bucket[code] = min(MAX_COUNT, bucket.get(code, 0) + count)
         except Exception:
             # A diagnostic failure cannot affect the import or review result.
             pass
 
-    def _diagnostics_enabled(self):
+    def _diagnostic_epoch(self):
         try:
-            return self.diagnostics is not None and getattr(self.diagnostics, 'enabled', True) is True
+            if self.diagnostics is not None:
+                return self.diagnostics.consent_epoch()
         except Exception:
-            return False
+            pass
+        return None
 
     @contextmanager
     def _diagnostic_batch(self):
         attempts = []
+        local = self._diagnostic_local
+        previous_pending = getattr(local, 'pending', None)
+        previous_epochs = getattr(local, 'attempt_epochs', None)
+        pending = {}
+        local.pending = pending
+        local.attempt_epochs = {}
         try:
             yield attempts
         finally:
-            for attempt in attempts:
-                if attempt['collect']:
-                    self._diagnostic('formats', attempt['format'])
-                    self._diagnostic('outcomes', attempt['outcome'])
+            try:
+                for attempt in attempts:
+                    epoch = attempt['epoch']
+                    if epoch is not None:
+                        self._diagnostic('formats', attempt['format'], epoch=epoch)
+                        self._diagnostic('outcomes', attempt['outcome'], epoch=epoch)
+            finally:
+                local.pending = previous_pending
+                local.attempt_epochs = previous_epochs
+            for epoch, counters in pending.items():
+                try:
+                    self.diagnostics.record_batch(counters, epoch=epoch)
+                except Exception:
+                    # Diagnostics must preserve the import result or its original exception.
+                    pass
 
     @contextmanager
-    def _diagnostic_stage(self, stage):
+    def _diagnostic_stage(self, stage, *, epoch=_CURRENT_EPOCH):
+        if epoch is _CURRENT_EPOCH:
+            epoch = self._diagnostic_epoch()
         try:
             yield
         except Exception:
-            self._diagnostic('failure_stages', stage)
+            self._diagnostic('failure_stages', stage, epoch=epoch)
             raise
 
-    def _diagnostic_document(self, record, parsed):
-        if self.diagnostics is None:
+    def _diagnostic_document(self, record, parsed, *, epoch):
+        if epoch is None:
             return
         try:
             codes = {issue['code'] for issue in quality.issues(parsed) if type(issue.get('code')) is str}
@@ -161,12 +200,13 @@ class Workspace:
                 if not parsed.get('names') or not parsed.get('births'):
                     codes.add('missing_identity')
             for code in codes:
-                self._diagnostic('review_reasons', code)
+                self._diagnostic('review_reasons', code, epoch=epoch)
         except Exception:
             pass
 
     def _export_workbook(self, db):
         from .workbook import export_workbook
+        epoch = self._diagnostic_epoch()
         try:
             export_workbook(self, db)
         except Exception as exc:
@@ -179,7 +219,7 @@ class Workspace:
                     stage = 'export_locked'
             except OSError:
                 pass
-            self._diagnostic('failure_stages', stage)
+            self._diagnostic('failure_stages', stage, epoch=epoch)
             raise
 
     def files(self):
@@ -276,10 +316,13 @@ class Workspace:
         return 'Повтор' if duplicate else 'Добавлен',document_id
 
     @staticmethod
-    def _load_analysis(record):
+    def _load_analysis(record, *, db=None):
         parsed = json.loads(record['analysis'])
         if 'quality' not in parsed:
-            parsed['quality'] = quality.assess(parsed, json.loads(record['extracted']))
+            # Projected reads only need the full extraction for legacy documents.
+            extracted = (record['extracted'] if db is None else db.execute(
+                'SELECT extracted FROM documents WHERE id=?', (record['id'],)).fetchone()[0])
+            parsed['quality'] = quality.assess(parsed, json.loads(extracted))
         return parsed
 
     @staticmethod
@@ -357,7 +400,9 @@ class Workspace:
         return target
 
     def finish_moves(self,db,progress):
+        attempt_epochs = getattr(self._diagnostic_local, 'attempt_epochs', None) or {}
         for row in db.execute("SELECT * FROM arrivals WHERE status='pending' ORDER BY id").fetchall():
+            epoch = attempt_epochs.get(row['source'], _CURRENT_EPOCH)
             source=Path(row['source']);target=Path(row['destination']) if row['destination'] else self.destination(row)
             with db:db.execute('UPDATE arrivals SET destination=? WHERE id=?',(str(target),row['id']))
             try:
@@ -378,10 +423,10 @@ class Workspace:
                     db.execute("UPDATE arrivals SET status='done',error='' WHERE id=?",(row['id'],))
                     self.event(db,'moved',json.dumps({'arrival':row['id'],'destination':str(target)},ensure_ascii=False))
             except OSError as exc:
-                self._diagnostic('failure_stages', 'archive')
+                self._diagnostic('failure_stages', 'archive', epoch=epoch)
                 with db:db.execute('UPDATE arrivals SET error=? WHERE id=?',('Не удалось переместить файл. Возможно, он открыт: '+str(exc),row['id']))
             except RuntimeError as exc:
-                self._diagnostic('failure_stages', 'archive')
+                self._diagnostic('failure_stages', 'archive', epoch=epoch)
                 with db:db.execute('UPDATE arrivals SET error=? WHERE id=?',(str(exc),row['id']))
 
     def import_folder(self,progress=lambda **state:None,cancel=None):
@@ -394,7 +439,7 @@ class Workspace:
                 if cancel.is_set():break
                 progress(done=index-1,current=path.name)
                 attempt = {'format': DIAGNOSTIC_FORMATS.get(path.suffix.lower(), 'other'),
-                           'stage': 'storage', 'outcome': 'error', 'collect': self._diagnostics_enabled()}
+                           'stage': 'storage', 'outcome': 'error', 'epoch': self._diagnostic_epoch()}
                 attempts.append(attempt)
                 try:
                     with db:
@@ -402,8 +447,7 @@ class Workspace:
                         self.event(db,'import',json.dumps({'source':str(path),'result':result,'document':document_id},ensure_ascii=False))
                     batch.append({'file':path.name,'source':str(path),'status':result,'document_id':document_id})
                 except Exception as exc:
-                    if attempt['collect']:
-                        self._diagnostic('failure_stages', attempt['stage'])
+                    self._diagnostic('failure_stages', attempt['stage'], epoch=attempt['epoch'])
                     try:digest=sha256(path)
                     except OSError:digest='unreadable-'+hashlib.sha256(str(path).encode()).hexdigest()
                     with db:
@@ -417,6 +461,9 @@ class Workspace:
             self._export_workbook(db)
             progress(phase='Перенос файлов')
             with self._diagnostic_stage('archive'):
+                self._diagnostic_local.attempt_epochs.update(
+                    (item['source'], attempt['epoch']) for item, attempt in zip(batch, attempts)
+                )
                 self.finish_moves(db,progress)
             with self._diagnostic_stage('storage'):
                 self.backup(db)
@@ -427,8 +474,7 @@ class Workspace:
                 if item['status']=='Добавлен':
                     record=db.execute('SELECT * FROM documents WHERE id=?',(item['document_id'],)).fetchone()
                     parsed = self._load_analysis(record)
-                    if attempt['collect']:
-                        self._diagnostic_document(record, parsed)
+                    self._diagnostic_document(record, parsed, epoch=attempt['epoch'])
                     if not record['patient_id']:
                         item['status']='Уточнить пациента'
                     elif quality.needs_review(parsed):
@@ -440,7 +486,7 @@ class Workspace:
             return result
 
     def _diagnostic_import_outcome(self, db, item, attempt):
-        if not attempt['collect'] or item['status'] == 'Ошибка':
+        if attempt['epoch'] is None or item['status'] == 'Ошибка':
             return
         outcomes = {'Добавлен': 'saved', 'Повтор': 'duplicate',
                     'Уточнить пациента': 'identity_review', 'Проверить данные': 'quality_review'}
@@ -470,27 +516,43 @@ class Workspace:
     def summary(self,db=None):
         if db is None:
             with self.connect() as connection:return self.summary(connection)
-        records = [(row, self._load_analysis(row)) for row in db.execute('SELECT * FROM documents')]
-        active = [(row, parsed) for row, parsed in records if not parsed.get('duplicate_of')]
-        identity = {row['id'] for row, _ in active if not row['patient_id']}
-        uncertain = {row['id'] for row, parsed in active if quality.needs_review(parsed)}
+        has_documents = False
+        patients = set()
+        documents = identity = uncertain = total_review = incomplete = 0
+        for row in db.execute('SELECT id, patient_id, analysis FROM documents'):
+            has_documents = True
+            parsed = self._load_analysis(row, db=db)
+            if parsed.get('duplicate_of'):
+                continue
+            documents += 1
+            patient_id = row['patient_id']
+            if patient_id:
+                patients.add(patient_id)
+            needs_identity = not patient_id
+            needs_quality = quality.needs_review(parsed)
+            identity += needs_identity
+            uncertain += needs_quality
+            total_review += needs_identity or needs_quality
+            incomplete += bool(parsed['quality'].get('confirmed') and parsed['quality'].get('incomplete'))
+        workbook = self.root / 'Исследования.xlsx'
         exported = db.execute("SELECT value FROM meta WHERE key='exported_revision'").fetchone()
-        pending_export = bool(records) and (
-            not exported or exported[0] != self._revision(db) or not (self.root/'Исследования.xlsx').is_file()
+        pending_export = has_documents and (
+            not exported or exported[0] != self._revision(db) or not workbook.is_file()
         )
-        incomplete = sum(1 for _, parsed in active if parsed['quality'].get('confirmed') and parsed['quality'].get('incomplete'))
+        arrivals = db.execute('''SELECT COUNT(CASE WHEN category='Дубли' THEN 1 END) AS duplicates,
+                                        COUNT(CASE WHEN category='Ошибки' THEN 1 END) AS errors,
+                                        COUNT(CASE WHEN status='pending' THEN 1 END) AS pending_moves
+                                 FROM arrivals''').fetchone()
         return {
             'pending_export': pending_export,
-            'documents': len(active),
-            'patients': len({row['patient_id'] for row, _ in active if row['patient_id']}),
-            'review': len(identity),
-            'quality_review': len(uncertain),
-            'total_review': len(identity | uncertain),
+            'documents': documents,
+            'patients': len(patients),
+            'review': identity,
+            'quality_review': uncertain,
+            'total_review': total_review,
             'incomplete': incomplete,
-            'duplicates':db.execute("SELECT count(*) FROM arrivals WHERE category='Дубли'").fetchone()[0],
-            'errors':db.execute("SELECT count(*) FROM arrivals WHERE category='Ошибки'").fetchone()[0],
-            'pending_moves':db.execute("SELECT count(*) FROM arrivals WHERE status='pending'").fetchone()[0],
-            'workbook':str(self.root/'Исследования.xlsx'),
+            **dict(arrivals),
+            'workbook': str(workbook),
         }
 
     def problems(self):
@@ -512,12 +574,27 @@ class Workspace:
             if not row:raise ValueError('Документ не найден')
             return dict(row)
 
+    def documents_by_ids(self, ids):
+        """Read the fields needed for batch statuses; omit IDs missing from the registry."""
+        ids = list(dict.fromkeys(ids))
+        if not ids:
+            return {}
+        result = {}
+        with self.connect() as db:
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                parameters = ','.join('?' for _ in chunk)
+                query = f'SELECT id, patient_id, analysis FROM documents WHERE id IN ({parameters})'
+                result.update((row['id'], dict(row)) for row in db.execute(query, chunk))
+        return result
+
     def assign(self,document_id,name,birth):
         from .parsing import FULL_NAME,normalized
         import re
         name=normalized(name)
         if not re.fullmatch(FULL_NAME,name):raise ValueError('Укажите фамилию, имя и отчество полностью')
         datetime.strptime(birth,'%Y-%m-%d')
+        epoch = self._diagnostic_epoch()
         with self.lock(),self.connect() as db:
             self.backup(db)
             record=db.execute('SELECT * FROM documents WHERE id=?',(document_id,)).fetchone()
@@ -530,7 +607,7 @@ class Workspace:
                 db.execute('UPDATE documents SET patient_id=?,decision=?,reason=? WHERE id=?',(patient_id,now(),'Пациент подтверждён пользователем',document_id))
                 self._schedule_category(db, document_id, self._category({'patient_id': patient_id}, self._load_analysis(record)))
                 self.touch(db);self.event(db,'patient_confirmed',document_id)
-            self._diagnostic('edit_categories', 'identity')
+            self._diagnostic('edit_categories', 'identity', epoch=epoch)
             self._export_workbook(db)
             self.finish_moves(db,lambda **kw:None)
             self.backup(db)
@@ -558,6 +635,17 @@ class Workspace:
                 item['section_id'] = stable_id(document_id, 'section', index, 0)
                 item['legacy_section_index'] = index
         return parsed
+
+    def has_serious_review_issue(self):
+        from .support import has_serious_issue
+        with self.connect() as db:
+            for row in db.execute('SELECT id, analysis FROM documents'):
+                parsed = self._load_analysis(row, db=db)
+                if not parsed.get('duplicate_of') and has_serious_issue(
+                    issue.get('code') for issue in quality.issues(parsed)
+                ):
+                    return True
+        return False
 
     def quality_review_list(self):
         with self.connect() as db:
@@ -591,14 +679,17 @@ class Workspace:
     def _finish_review_change(self, db):
         try:
             self._export_workbook(db)
+            self.finish_moves(db, lambda **state: None)
+            self.backup(db)
+            return self.summary(db)
         except Exception as exc:
-            raise RuntimeError('Решение сохранено в базе. Закройте Excel и нажмите «Обработать», чтобы обновить таблицу. '+str(exc)) from exc
-        self.finish_moves(db, lambda **state: None)
-        self.backup(db)
-        return self.summary(db)
+            raise ReviewCommittedError(
+                'Решение сохранено в базе. Закройте таблицу в Excel и повторите сохранение в главном окне, '
+                'чтобы завершить обновление таблицы и файлов.'
+            ) from exc
 
-    def _diagnostic_review_changes(self, record, parsed):
-        if self.diagnostics is None:
+    def _diagnostic_review_changes(self, record, parsed, *, epoch):
+        if epoch is None:
             return
         try:
             previous = self._with_result_ids(record['id'], self._load_analysis(record))
@@ -623,7 +714,7 @@ class Workspace:
             if old_conclusions != new_conclusions:
                 categories.add('conclusion')
             for code in categories:
-                self._diagnostic('edit_categories', code)
+                self._diagnostic('edit_categories', code, epoch=epoch)
         except Exception:
             pass
 
@@ -715,6 +806,7 @@ class Workspace:
         note = note.strip()
         if not note:
             raise ValueError('Укажите результат сверки с оригиналом.')
+        epoch = self._diagnostic_epoch()
         with self.lock(), self.connect() as db:
             record = self._checked_document(db, document_id, expected_revision)
             parsed = self._with_result_ids(document_id, self._load_analysis(record))
@@ -748,21 +840,22 @@ class Workspace:
             parsed['quality'].update(confirmed=True, protected=True, confirmed_at=now(), note=note,
                                      incomplete=bool(incomplete), accepted_missing=incomplete)
             self.backup(db)
-            with self._diagnostic_stage('review'),db:
+            with self._diagnostic_stage('review', epoch=epoch),db:
                 self._save_study_history(db, record, 'quality_confirmed', note)
                 db.execute('UPDATE documents SET analysis=? WHERE id=?',
                            (json.dumps(parsed, ensure_ascii=False), document_id))
                 self._schedule_category(db, document_id, self._category(record, parsed))
                 self.touch(db)
                 self.event(db, 'quality_confirmed', document_id)
-            self._diagnostic('review_outcomes', 'confirmed_incomplete' if incomplete else 'confirmed')
-            self._diagnostic_review_changes(record, parsed)
+            self._diagnostic('review_outcomes', 'confirmed_incomplete' if incomplete else 'confirmed', epoch=epoch)
+            self._diagnostic_review_changes(record, parsed, epoch=epoch)
             return self._finish_review_change(db)
 
     def mark_duplicate(self, document_id, target_id, note, expected_revision=None):
         note = note.strip()
         if not note or document_id == target_id:
             raise ValueError('Укажите другое исследование и основание для подтверждения дубля.')
+        epoch = self._diagnostic_epoch()
         with self.lock(), self.connect() as db:
             record = self._checked_document(db, document_id, expected_revision)
             target = self._checked_document(db, target_id)
@@ -777,14 +870,14 @@ class Workspace:
             parsed['duplicate_of'] = target_id
             parsed['quality'].update(confirmed=True, confirmed_at=now(), note=note)
             self.backup(db)
-            with self._diagnostic_stage('review'),db:
+            with self._diagnostic_stage('review', epoch=epoch),db:
                 self._save_study_history(db, record, 'duplicate_confirmed', note)
                 db.execute('UPDATE documents SET analysis=? WHERE id=?',
                            (json.dumps(parsed, ensure_ascii=False), document_id))
                 self._schedule_category(db, document_id, 'Дубли')
                 self.touch(db)
                 self.event(db, 'duplicate_confirmed', json.dumps({'id': document_id, 'target': target_id}))
-            self._diagnostic('review_outcomes', 'excluded')
+            self._diagnostic('review_outcomes', 'excluded', epoch=epoch)
             return self._finish_review_change(db)
 
     @staticmethod
@@ -883,6 +976,7 @@ class Workspace:
     def apply_reprocess(self, document_id, candidate):
         if candidate.get('document_id') != document_id or 'revision' not in candidate:
             raise ValueError('Сначала откройте результат повторного распознавания.')
+        epoch = self._diagnostic_epoch()
         with self.lock(), self.connect() as db:
             record = self._checked_document(db, document_id, candidate['revision'])
             original = Path(record['original'])
@@ -902,7 +996,7 @@ class Workspace:
                 owner = db.execute('SELECT name,birth FROM patients WHERE id=?', (record['patient_id'],)).fetchone()
                 if parsed['names'] != [owner['name']] or parsed['births'] != [owner['birth']]:
                     parsed['reprocess_identity_changed'] = True
-            with self._diagnostic_stage('review'),db:
+            with self._diagnostic_stage('review', epoch=epoch),db:
                 self._save_study_history(db, record, 'reprocessed', '', proposal=proposed)
                 db.execute('UPDATE documents SET extracted=?,analysis=?,fingerprint=? WHERE id=?',
                            (json.dumps(extracted, ensure_ascii=False), json.dumps(parsed, ensure_ascii=False),
@@ -910,7 +1004,7 @@ class Workspace:
                 self.touch(db)
                 self.resolve_patients(db)
                 self.event(db, 'reprocessed', document_id)
-            self._diagnostic('review_outcomes', 'reprocessed')
+            self._diagnostic('review_outcomes', 'reprocessed', epoch=epoch)
             return self._finish_review_change(db)
 
     def document_list(self):

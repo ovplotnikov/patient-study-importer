@@ -18,19 +18,15 @@ shutil.copytree(source,target,dirs_exist_ok=True)
 for extra in target.glob('*.exe'):
     if extra.name.lower()!='tesseract.exe':extra.unlink()
 ocr_weights = prepare_models(root/'vendor')
-rapid_data = importlib.metadata.distribution('rapidocr').locate_file('rapidocr')
 crt_revision, crt_files = find_crt()
-crt_args = [arg for path in crt_files for arg in ('--add-binary', str(path)+';.')]
 exe = root/'dist'/'Исследования пациентов.exe'
-subprocess.run([sys.executable,'-m','PyInstaller','--noconfirm','--clean','--noupx','--onefile','--windowed',
-                *crt_args,
-                '--name','Исследования пациентов','--add-data',str(root/'vendor')+';vendor',
-                '--add-data',str(root/'patient_importer'/'assets')+';patient_importer/assets',
-                '--add-data',str(rapid_data/'config.yaml')+';rapidocr',
-                '--add-data',str(rapid_data/'default_models.yaml')+';rapidocr',
-                '--collect-binaries','onnxruntime','--copy-metadata','rapidocr',
-                '--collect-all','tkinterdnd2','--collect-all','pypdfium2','--collect-all','pypdfium2_raw',str(root/'app.py')],cwd=root,check=True)
-ocr_runtime = audit_archive(exe, crt_revision)
+layout_file = root/'build'/'windows-tesseract-layout.json'
+layout_file.parent.mkdir(parents=True, exist_ok=True)
+subprocess.run([sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean',
+                str(root/'packaging'/'windows.spec'), '--', str(layout_file),
+                *(str(path) for path in crt_files)], cwd=root, check=True)
+ocr_runtime = audit_archive(exe, crt_revision, tesseract=target, crt_files=crt_files,
+                            weights=ocr_weights, layout=json.loads(layout_file.read_text(encoding='utf-8')))
 (root/'dist'/'Инструкция.txt').write_text('Откройте docs/Краткая инструкция.pdf или docs/guide.html.\nВ программе кнопка «Помощь» всегда открывает инструкцию текущей версии.\n',encoding='utf-8-sig')
 docs_target=root/'dist'/'docs';docs_target.mkdir(exist_ok=True)
 for name in ['Краткая инструкция.pdf','guide.html']:

@@ -8,7 +8,7 @@ from unittest.mock import patch
 from openpyxl import load_workbook
 
 from patient_importer.smoke import SAMPLE
-from patient_importer.storage import Workspace, sha256
+from patient_importer.storage import ReviewCommittedError, Workspace, sha256
 
 
 class QualityStorageTests(unittest.TestCase):
@@ -190,14 +190,28 @@ class QualityStorageTests(unittest.TestCase):
     def test_export_failure_keeps_decision_and_marks_export_pending(self):
         self.add('проверка.txt', 'Пациент: ТЕСТОВ ТЕСТ ТЕСТОВИЧ\nДата рождения: 01.01.2000\n')
         document_id = self.workspace.import_folder()['batch'][0]['document_id']
-        with patch('patient_importer.workbook.export_workbook', side_effect=OSError('учебный отказ')):
-            with self.assertRaisesRegex(RuntimeError, 'Решение сохранено'):
+        failure = OSError('учебный отказ')
+        with patch('patient_importer.workbook.export_workbook', side_effect=failure):
+            with self.assertRaisesRegex(ReviewCommittedError, 'Решение сохранено') as raised:
                 self.workspace.confirm_quality(document_id, note='Сохранить неполный учебный оригинал.')
+        self.assertIs(raised.exception.__cause__, failure)
         self.assertTrue(self.workspace.summary()['pending_export'])
         self.assertEqual(self.workspace.summary()['quality_review'], 0)
         result = self.workspace.import_folder()
         self.assertFalse(result['pending_export'])
         self.assertEqual(result['pending_moves'], 0)
+
+    def test_review_failure_before_commit_preserves_draft_for_retry(self):
+        self.add('проверка.txt', 'Пациент: ТЕСТОВ ТЕСТ ТЕСТОВИЧ\nДата рождения: 01.01.2000\n')
+        document_id = self.workspace.import_folder()['batch'][0]['document_id']
+        failure = OSError('учебный сбой записи в реестр')
+        with patch.object(self.workspace, '_schedule_category', side_effect=failure):
+            with self.assertRaises(OSError) as raised:
+                self.workspace.confirm_quality(document_id, note='Сохранить неполный учебный оригинал.')
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(self.workspace.summary()['quality_review'], 1)
+        result = self.workspace.confirm_quality(document_id, note='Сохранить неполный учебный оригинал.')
+        self.assertEqual(result['quality_review'], 0)
 
     def test_manual_conclusion_and_journal_survive_reprocessing(self):
         source = ('УЗИ почек\nПациент: ТЕСТОВ ТЕСТ ТЕСТОВИЧ\nДата рождения: 01.01.2000\n'

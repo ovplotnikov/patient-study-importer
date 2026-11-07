@@ -3,7 +3,9 @@ import json
 import os
 from pathlib import Path
 import sys
+import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import unquote
 
@@ -17,7 +19,7 @@ def run(root):
     os.environ['APPDATA']=str(settings);os.environ['LOCALAPPDATA']=str(settings)
     (settings_dir/'settings.json').write_text(json.dumps({'workspace':str(workspace)}))
     from tkinter import ttk,messagebox
-    from .gui import Application
+    from .gui import Application, DOCUMENTS_PER_PAGE
     from .smoke import SAMPLE
     from . import __version__,updater
     from PIL import Image,ImageGrab,ImageDraw,ImageFont
@@ -32,10 +34,37 @@ def run(root):
         assert not errors,errors
     def finish():
         deadline=time.monotonic()+60
-        while app.working or not app.events.empty():
+        while app.working or app.workspace_actions.active or not app.events.empty():
             settle();time.sleep(.04)
             assert time.monotonic()<deadline,'UI operation timeout'
         settle()
+    def check_background_save(method,invoke,while_pending):
+        entered=threading.Event()
+        release=threading.Event()
+        original=getattr(app.workspace,method)
+        calls=[]
+
+        def held(*args,**kwargs):
+            calls.append(threading.get_ident())
+            entered.set()
+            assert release.wait(15),'Save test did not release the worker'
+            return original(*args,**kwargs)
+
+        with patch.object(app.workspace,method,side_effect=held):
+            invoke()
+            try:
+                deadline=time.monotonic()+15
+                while not entered.is_set():
+                    settle();time.sleep(.02)
+                    assert time.monotonic()<deadline,'Save did not start'
+                ticks=[]
+                app.root.after(0,lambda:ticks.append(True))
+                settle()
+                assert ticks and len(calls)==1 and calls[0]!=threading.get_ident()
+                while_pending()
+            finally:release.set()
+            finish()
+        assert len(calls)==1
     def visible(button):
         window=button.winfo_toplevel()
         assert button.winfo_ismapped(),str(button)
@@ -77,7 +106,6 @@ def run(root):
     if os.name=='nt':
         assert app.dnd
         data=app.root.tk.call('list',str(first),str(second),str(third))
-        from types import SimpleNamespace
         app.on_drop(SimpleNamespace(data=data))
     else:app.stage([first,second,third])
     finish();assert len(app.paths)==3
@@ -107,10 +135,44 @@ def run(root):
     writer.add_blank_page(width=595,height=842);writer.add_blank_page(width=595,height=842)
     writer.write(preview)
     review.show_preview({'original':str(preview)},{'pages':['Synthetic preview']});settle()
-    assert review.preview_document is not None and hasattr(review,'preview_photo')
+    assert review.preview_document is not None and review.preview_photo is not None
     review.turn_page(1);review.resize_preview(.25);settle()
     assert review.page==1 and review.zoom==1.25
-    review.use_candidate(*review.candidates[0]);review.confirm_button.invoke();settle()
+
+    class UnrenderablePreview:
+        def __init__(self):
+            self.closed=False
+            self.attempts=0
+
+        def __getitem__(self,index):
+            self.attempts+=1
+            raise RuntimeError('Synthetic render failure')
+
+        def close(self):
+            self.closed=True
+
+    cancelled=UnrenderablePreview()
+    broken=UnrenderablePreview()
+    with patch('pypdfium2.PdfDocument',side_effect=[cancelled,broken]):
+        review.show_preview({'original':str(preview)},{'pages':['Synthetic replacement']})
+        review.show_preview({'original':str(preview)},{'pages':['Synthetic replacement']})
+        assert not review.canvas.find_all() and review.preview_photo is None
+        settle()
+        assert cancelled.closed and cancelled.attempts==0 and broken.attempts==1
+        assert not review.canvas.find_all() and review.preview_photo is None
+        assert review.page_label.get()=='Откройте оригинал'
+    review.show_preview({'original':str(preview)},{'pages':['Synthetic preview']});settle()
+    preview_handle=review.preview_document
+    assert broken.closed and preview_handle is not None and review.preview_photo is not None
+    review.use_candidate(*review.candidates[0])
+    def while_patient_pending():
+        assert review.saving and str(review.confirm_button['state'])=='disabled'
+        review.confirm()
+        review.close()
+        assert review.window.winfo_exists()
+        app.start();app.stage([first]);app.select(root/'blocked-workspace')
+        assert not app.working and not (root/'blocked-workspace').exists()
+    check_background_save('assign',review.confirm_button.invoke,while_patient_pending)
     assert review.selected is None and not review.records
     assert str(review.confirm_button['state'])=='disabled'
     with app.workspace.connect() as db:before=db.execute("SELECT count(*) FROM events WHERE kind='patient_confirmed'").fetchone()[0]
@@ -119,6 +181,7 @@ def run(root):
     assert before==after==1
     capture('04-confirmed.png',review.window)
     review.next_button.invoke();settle()
+    assert preview_handle.raw is None
     assert app.workspace.summary()['review']==0
     assert app.workspace.summary()['quality_review']==1
     assert app.heading.cget('text')=='Нужно ваше внимание','Identity approval must not approve results'
@@ -136,7 +199,12 @@ def run(root):
     assert quality.observations[0]['unit']=='мкмоль/л' and quality.observations[0]['number'] is None
     quality.note.insert('1.0','Сверены все строки учебного оригинала; единица измерения исправлена.')
     quality.attest.invoke();settle();assert str(quality.confirm_button['state'])=='normal'
-    quality.confirm_button.invoke();settle()
+    def while_quality_pending():
+        assert quality.saving and str(quality.confirm_button['state'])=='disabled'
+        quality.confirm()
+        quality.close()
+        assert quality.window.winfo_exists()
+    check_background_save('confirm_quality',quality.confirm_button.invoke,while_quality_pending)
     assert quality.selected is None and not quality.records
     assert app.workspace.summary()['total_review']==0
     capture('09-quality-finished.png',quality.window);quality.window.destroy();settle()
@@ -149,12 +217,13 @@ def run(root):
     while history.candidate is None:
         settle();time.sleep(.04);assert time.monotonic()<deadline,'Reprocess draft timeout'
     capture('10-history.png',history.candidate_window)
-    visible(history.apply_button);history.apply_button.invoke();settle()
+    visible(history.apply_button);history.apply_button.invoke();finish()
     assert app.workspace.summary()['documents']==3 and app.workspace.summary()['total_review']==0
     history.close();settle()
+    app.show_documents();settle();assert str(app.start_button['state'])=='disabled'
     with app.workspace.connect() as db:app.workspace.touch(db)
     app.refresh();settle();assert str(app.excel_button['state'])=='disabled','Stale workbook must not look current'
-    app.show_documents();settle();assert str(app.start_button['state'])=='normal'
+    assert str(app.start_button['state'])=='normal','Refreshing an out-of-date workbook must enable save'
     app.start();finish();assert str(app.excel_button['state'])=='normal'
     assert all(p.exists() for p in [first,second,third]),'External originals changed'
     app.show_documents();app.stage([first]);finish();app.start();finish()
@@ -168,7 +237,6 @@ def run(root):
     assert len(app.paths)==1,'Retry must restore the queue'
     app.start();finish();assert app.workspace.summary()['errors']==1
     # Stop during a real import, complete the current document, then resume.
-    import threading
     entered=threading.Event();release=threading.Event()
     original_add=app.workspace.add_file
     def held_add(*args,**kwargs):
@@ -259,7 +327,7 @@ def run(root):
     assert candidate.winfo_rooty()+candidate.winfo_height()<=app.review_window.editor_area.canvas.winfo_rooty()+app.review_window.editor_area.canvas.winfo_height()
     candidate.invoke();settle();visible(app.review_window.name_entry)
     capture('review-fields-150-percent.png',app.review_window.window)
-    app.review_window.use_candidate(*app.review_window.candidates[0]);app.review_window.confirm();settle()
+    app.review_window.use_candidate(*app.review_window.candidates[0]);app.review_window.confirm();finish()
     app.review_window.next_button.invoke();settle()
     capture('quality-150-percent.png',app.review_window.window)
     visible(app.review_window.confirm_button);visible(app.review_window.attest)
@@ -273,7 +341,7 @@ def run(root):
     quality.sections_editors[-1].delete('1.0','end');quality.sections_editors[-1].insert('1.0','Заключение: учебный текст сверён и исправлен.')
     quality.sections_save_button.invoke();settle()
     quality.date.set('02.03.2025');quality.note.insert('1.0','Текст заключения сверён; числовых показателей нет.')
-    quality.attest.invoke();quality.confirm_button.invoke();settle()
+    quality.attest.invoke();quality.confirm_button.invoke();finish()
     assert not quality.records
     with app.workspace.connect() as db:
         parsed=json.loads(db.execute('SELECT analysis FROM documents').fetchone()[0])
@@ -288,13 +356,66 @@ def run(root):
     duplicate=next(r for r in quality.records.values() if any(i['code']=='possible_duplicate' for i in r['issues']))
     quality.list.selection_set(duplicate['id']);quality.load();quality.compare_duplicate();settle()
     assert quality.duplicate_window.window.winfo_exists()
-    quality.duplicate_window.confirm();settle()
+    quality.duplicate_window.confirm();finish()
     assert app.workspace.summary()['documents']==1 and app.workspace.summary()['duplicates']==1
     quality.window.destroy()
-    app.root.destroy()
+    # Long queues retain their visible widgets across focus and expose every file.
+    queue_root=root/'long-queue'
+    incoming=queue_root/'Входящие';incoming.mkdir(parents=True)
+    for index in range(1000):
+        (incoming/f'Учебный документ {index:04d}.txt').write_text(SAMPLE,encoding='utf8')
+    app.select(queue_root);settle()
+    assert len(app.paths)==1000
+    children=tuple(app.content.body.winfo_children())
+    assert len(children)==DOCUMENTS_PER_PAGE*2
+    visible(app.page_previous);visible(app.page_next)
+    with patch.object(app.workspace,'summary',wraps=app.workspace.summary) as summary:
+        app.show_documents()
+        assert sum(not args and not kwargs for args,kwargs in summary.call_args_list)==1
+    app.focus_refresh(SimpleNamespace(widget=app.root));settle()
+    assert tuple(app.content.body.winfo_children())==children
+    with patch.object(app.workspace,'summary',wraps=app.workspace.summary) as summary:
+        app.page_next.invoke()
+        summary.assert_not_called()
+    settle()
+    assert app.documents_page==1 and tuple(app.content.body.winfo_children())!=children
+    app.turn_list_page(1000);settle()
+    assert str(app.page_next['state'])=='disabled'
+    assert app.page_range.cget('text').endswith('1000 из 1000')
+    last=app.paths[-1]
+    last_row=app.content.body.winfo_children()[-2]
+    remove=next(child for child in last_row.winfo_children() if isinstance(child,ttk.Button))
+    remove.invoke();settle()
+    assert len(app.paths)==999 and not last.exists()
+    assert (queue_root/'Отложено'/last.name).is_file()
+    release=threading.Event()
+    failed=threading.Event()
+    completed=[]
+
+    def fail_during_close():
+        assert release.wait(15)
+        failed.set()
+        raise RuntimeError('Synthetic failure while closing')
+
+    with patch.object(app.root,'destroy',wraps=app.root.destroy) as destroy:
+        assert app.workspace_actions.run(fail_during_close,lambda result,error:completed.append((result,error)))
+        try:
+            app.close()
+            assert app.closing and app.root.winfo_exists()
+            destroy.assert_not_called()
+        finally:release.set()
+        deadline=time.monotonic()+15
+        while not destroy.called:
+            settle();time.sleep(.02)
+            assert time.monotonic()<deadline,'Closing did not wait for the workspace action'
+        destroy.assert_called_once()
+    assert failed.is_set() and not completed
     ocr_patch.stop()
     result={'ok':True,'checks':['empty_state','picker_or_native_drop_callback','external_originals_preserved','same_patient_incremental_import','per_file_results','small_window_buttons','wheel_over_row','150_percent_layout','visible_candidates','pdf_preview_pages_zoom','confirmation_clears_selection','repeat_confirmation_blocked','consistent_result_state','quality_stays_pending_after_identity','explicit_quality_attestation','inequality_and_corrected_unit_preserved','quality_small_window_and_150_percent','reprocess_preview_apply_same_study','stale_workbook_requires_save','narrative_text_correction','manual_duplicate_comparison','deduplication','actionable_errors','retry_returns_to_queue','stop_and_resume','automatic_update_offer_decline','embedded_help' if getattr(sys,'frozen',False) else 'source_capture']}
     result['checks'].extend(['diagnostics_explicit_opt_in','diagnostics_withdrawal_clears_queue',
                              'diagnostics_refusal_survives_update','manual_template_draft_no_attachment',
-                             'diagnostics_and_support_150_percent_layout'])
+                             'diagnostics_and_support_150_percent_layout','patient_save_keeps_tk_responsive',
+                             'quality_save_keeps_tk_responsive','workspace_actions_block_conflicts',
+                             'close_waits_for_workspace_action','identity_preview_clears_on_failure',
+                             'long_queue_paging_focus_and_defer'])
     (root/'ui-test.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf8')

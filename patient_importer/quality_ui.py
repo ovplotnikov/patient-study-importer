@@ -1,14 +1,15 @@
 """Explicit source-to-result review. No confidence score substitutes for consent."""
+from collections import OrderedDict
 from copy import deepcopy
 from datetime import datetime
 import json
 from pathlib import Path
-import queue
-import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 
 from . import ui
+from .pdf_render import PDFIUM_LOCK
+from .storage import ReviewCommittedError
 
 
 def display_date(value):
@@ -27,10 +28,15 @@ def parse_date(value):
 
 class SourcePreview(ttk.Frame):
     """Show the immutable original; label text-only fallbacks honestly."""
+    CACHE_PAGES = 2
+    CACHE_PIXELS = 8_000_000
+    MAX_DIMENSION = 8192
+
     def __init__(self,parent,icons):
         super().__init__(parent)
-        self.icons=icons;self.document=None;self.analysis={};self.pdf=None;self.images=[]
-        self.page=0;self.zoom=1.;self.highlight=None
+        self.icons=icons;self.document=None;self.analysis={};self.pdf=None;self.image_path=None
+        self.page=0;self.zoom=1.;self.highlight=None;self.page_count=1
+        self.photos=OrderedDict();self.displayed=None;self.evidence={}
         bar=ttk.Frame(self);bar.pack(fill='x')
         self.title=ttk.Label(bar,text='Оригинал',font=(ui.FONT,12,'bold'));self.title.pack(side='left')
         ttk.Button(bar,text='Открыть файл',style='Link.TButton',command=self.open_original).pack(side='right')
@@ -54,80 +60,164 @@ class SourcePreview(ttk.Frame):
     def destroy_preview(self,event):
         if event.widget is self:
             if self.resize_job:self.after_cancel(self.resize_job);self.resize_job=None
-            if self.pdf:self.pdf.close();self.pdf=None
+            self.close_source()
+            self.photos.clear()
 
-    def schedule_render(self,event):
+    def close_source(self):
+        if self.pdf is not None:
+            with PDFIUM_LOCK:
+                self.pdf.close()
+            self.pdf=None
+        self.image_path=None
+
+    def schedule_render(self,event=None):
         if self.resize_job:self.after_cancel(self.resize_job)
         def render():
             self.resize_job=None
             if self.document:self.render()
-        self.resize_job=self.after(100,render)
+        self.resize_job=self.after(100,render) if event else self.after_idle(render)
 
     def load(self,document,analysis):
-        from PIL import Image,ImageOps,ImageSequence
-        if self.pdf:self.pdf.close();self.pdf=None
-        self.document=document;self.analysis=analysis;self.images=[];self.page=0;self.zoom=1.;self.highlight=None
+        if self.resize_job:self.after_cancel(self.resize_job);self.resize_job=None
+        self.close_source()
+        self.document=document;self.analysis=analysis;self.page=0;self.zoom=1.;self.highlight=None
+        self.page_count=max(1,len(analysis.get('pages',[])))
+        self.canvas.delete('all');self.photos.clear();self.displayed=None
         self.canvas.pack_forget();self.text.pack_forget()
+        self.evidence={}
+        for item in analysis.get('ocr_evidence',[]):
+            if item.get('source_kind',item.get('source')) in {'page','image'}:
+                self.evidence.setdefault((item.get('page'),item.get('line')),[]).append(item)
         path=Path(document['original'])
         try:
             if path.suffix.lower()=='.pdf':
                 import pypdfium2 as pdfium
-                self.pdf=pdfium.PdfDocument(path)
+                with PDFIUM_LOCK:
+                    self.pdf=pdfium.PdfDocument(path)
+                    self.page_count=max(1,len(self.pdf))
             elif path.suffix.lower() in {'.png','.jpg','.jpeg','.tif','.tiff','.bmp'}:
+                from PIL import Image
                 with Image.open(path) as image:
-                    self.images=[ImageOps.exif_transpose(frame.copy()).convert('RGB') for frame in ImageSequence.Iterator(image)]
-        except Exception:self.images=[]
-        if self.pdf or self.images:
+                    self.page_count=getattr(image,'n_frames',1)
+                self.image_path=path
+        except Exception:self.close_source()
+        if self.has_image():
             self.title.configure(text='Оригинал');self.canvas.pack(fill='both',expand=True)
             self.scroll.configure(command=self.canvas.yview);self.xscroll.pack(side='bottom',fill='x')
-            self.after_idle(self.render)
+            self.schedule_render()
         else:
-            self.title.configure(text='Извлечённый текст · откройте оригинал')
-            self.text.pack(fill='both',expand=True);self.scroll.configure(command=self.text.yview);self.xscroll.pack_forget()
-            self.render()
+            self.show_text()
 
-    def count(self):return len(self.pdf) if self.pdf else len(self.images) or max(1,len(self.analysis.get('pages',[])))
+    def show_text(self):
+        self.title.configure(text='Извлечённый текст · откройте оригинал')
+        self.canvas.pack_forget();self.xscroll.pack_forget()
+        self.text.pack(fill='both',expand=True);self.scroll.configure(command=self.text.yview)
+        self.render()
+
+    def has_image(self):return self.pdf is not None or self.image_path is not None
+
+    def count(self):return self.page_count
 
     def turn(self,delta):self.page=max(0,min(self.count()-1,self.page+delta));self.highlight=None;self.render()
     def resize(self,delta):self.zoom=max(.5,min(3.,self.zoom+delta));self.render()
 
+    def image_scale(self,width,height,target):
+        # PDFium rounds both output dimensions up to full pixels.
+        pixels=self.CACHE_PIXELS-2*self.MAX_DIMENSION-1
+        return min(target/width,self.MAX_DIMENSION/max(width,height),(pixels/(width*height))**.5)
+
+    def render_photo(self,target):
+        from PIL import Image,ImageOps,ImageTk
+        if self.pdf is not None:
+            with PDFIUM_LOCK:
+                page=self.pdf[self.page]
+                try:
+                    scale=min(4,self.image_scale(*page.get_size(),target))
+                    bitmap=page.render(scale=scale)
+                    try:
+                        image=bitmap.to_pil().copy()
+                    finally:
+                        bitmap.close()
+                finally:
+                    page.close()
+        else:
+            with Image.open(self.image_path) as source:
+                source.seek(self.page)
+                ImageOps.exif_transpose(source,in_place=True)
+                original=source if source.mode=='RGB' else source.convert('RGB')
+                scale=self.image_scale(*original.size,target)
+                size=tuple(max(1,int(dimension*scale)) for dimension in original.size)
+                image=original.resize(size,Image.Resampling.LANCZOS)
+        return ImageTk.PhotoImage(image,master=self)
+
     def render(self):
-        from PIL import Image,ImageTk
         self.page_label.configure(text=f'{self.page+1} / {self.count()}')
         try:
-            if self.pdf:
-                page=self.pdf[self.page];bitmap=page.render(scale=min(4,max(300,self.canvas.winfo_width()-24)/page.get_width()*self.zoom))
-                image=bitmap.to_pil().copy();bitmap.close();page.close()
-            elif self.images:
-                original=self.images[self.page];width=int(max(300,self.canvas.winfo_width()-24)*self.zoom)
-                image=original.resize((width,max(1,int(original.height*width/original.width))),Image.Resampling.LANCZOS)
+            if not self.has_image():
+                if self.displayed!=self.page:
+                    pages=self.analysis.get('pages',[])
+                    self.text.configure(state='normal');self.text.delete('1.0','end')
+                    self.text.insert('1.0',pages[self.page] if self.page<len(pages) else '')
+                    self.text.configure(state='disabled');self.displayed=self.page
             else:
-                pages=self.analysis.get('pages',[])
-                self.text.configure(state='normal');self.text.delete('1.0','end');self.text.insert('1.0',pages[self.page] if self.page<len(pages) else '')
-                if self.highlight:
-                    line=self.highlight.get('line',1);self.text.tag_add('source',f'{line}.0',f'{line}.end');self.text.see(f'{line}.0')
-                self.text.configure(state='disabled');return
-            self.photo=ImageTk.PhotoImage(image,master=self);self.canvas.delete('all')
-            self.canvas.create_image(12,8,anchor='nw',image=self.photo)
-            self.canvas.configure(scrollregion=(0,0,image.width+24,image.height+16))
-            if self.highlight:
-                line=self.highlight.get('line');physical=self.page+1
-                evidence=[e for e in self.analysis.get('ocr_evidence',[]) if e.get('page')==physical and e.get('line')==line and (not self.highlight.get('page_index') or e.get('page_index')==self.highlight['page_index']) and e.get('source_kind',e.get('source')) in {'page','image'}]
-                if evidence:
-                    e=evidence[0];w,h=e.get('image_size',(0,0));box=e.get('bbox',[])
-                    if w and h and len(box)==4:
-                        left,top,right,bottom=box
-                        self.canvas.create_rectangle(12+left*image.width/w,8+top*image.height/h,12+right*image.width/w,8+bottom*image.height/h,outline='#c67600',width=3)
-                        self.canvas.yview_moveto(max(0,(top*image.height/h-60)/(image.height+16)))
+                target=int(max(300,self.canvas.winfo_width()-24)*self.zoom)
+                key=(self.page,target)
+                if key!=self.displayed:
+                    self.canvas.delete('all');self.displayed=None
+                    photo=self.photos.get(key)
+                    if photo is None:
+                        try:photo=self.render_photo(target)
+                        except Exception:
+                            if self.image_path is None:raise
+                            self.image_path=None;self.photos.clear()
+                            self.page_count=max(1,len(self.analysis.get('pages',[])))
+                            self.page=min(self.page,self.page_count-1)
+                            self.show_text()
+                            return
+                        self.photos[key]=photo
+                    self.photos.move_to_end(key)
+                    while len(self.photos)>1 and (len(self.photos)>self.CACHE_PAGES or
+                          sum(p.width()*p.height() for p in self.photos.values())>self.CACHE_PIXELS):
+                        self.photos.popitem(last=False)
+                    self.canvas.create_image(12,8,anchor='nw',image=photo)
+                    self.canvas.configure(scrollregion=(0,0,photo.width()+24,photo.height()+16))
+                    self.displayed=key
+            self.draw_highlight()
         except Exception:self.page_label.configure(text='Откройте исходный файл')
+
+    def draw_highlight(self):
+        if not self.has_image():
+            self.text.tag_remove('source','1.0','end')
+            if self.highlight:
+                line=self.highlight.get('line',1);self.text.tag_add('source',f'{line}.0',f'{line}.end');self.text.see(f'{line}.0')
+            return
+        self.canvas.delete('source-highlight')
+        if not self.highlight or self.displayed is None:return
+        items=self.evidence.get((self.page+1,self.highlight.get('line')),[])
+        index=self.highlight.get('page_index')
+        item=next((e for e in items if not index or e.get('page_index')==index),None)
+        if not item:return
+        width,height=item.get('image_size',(0,0));box=item.get('bbox',[])
+        if width and height and len(box)==4:
+            photo=self.photos[self.displayed]
+            left,top,right,bottom=box;xs=photo.width()/width;ys=photo.height()/height
+            self.canvas.create_rectangle(12+left*xs,8+top*ys,12+right*xs,8+bottom*ys,
+                                         outline='#c67600',width=3,tags=('source-highlight',))
+            self.canvas.yview_moveto(max(0,(top*ys-60)/(photo.height()+16)))
 
     def locate(self,observation):
         physical=max(1,observation.get('page') or 1)
-        if self.pdf or self.images:self.page=min(self.count()-1,physical-1)
+        if self.has_image():page=min(self.count()-1,physical-1)
         else:
             numbers=self.analysis.get('page_numbers',[])
-            self.page=min(self.count()-1,max(0,observation['page_index']-1)) if observation.get('page_index') else numbers.index(physical) if physical in numbers else min(self.count()-1,physical-1)
-        self.highlight=observation;self.render()
+            page=min(self.count()-1,max(0,observation['page_index']-1)) if observation.get('page_index') else numbers.index(physical) if physical in numbers else min(self.count()-1,physical-1)
+        self.highlight=observation
+        if page==self.page and self.displayed is not None:
+            try:self.draw_highlight()
+            except Exception:self.page_label.configure(text='Откройте исходный файл')
+        else:
+            self.page=page
+            if self.displayed is not None or not self.resize_job:self.render()
 
     def open_original(self):
         from .gui import open_path
@@ -173,9 +263,11 @@ class ObservationEditor:
 
 
 class QualityReviewWindow:
-    def __init__(self,parent,workspace,on_change,icons):
+    def __init__(self,parent,workspace,on_change,icons,actions=None):
         self.workspace=workspace;self.on_change=on_change;self.icons=icons;self.selected=None;self.records={};self.observations=[];self.sections=[]
         self.window=tk.Toplevel(parent);self.window.title('Проверка данных');self.window.configure(bg='white')
+        self.actions=actions or ui.WorkspaceActions(self.window);self.saving=False
+        self.window.protocol('WM_DELETE_WINDOW',self.close)
         self.window.geometry(f'{min(1240,parent.winfo_screenwidth()-50)}x{min(850,parent.winfo_screenheight()-130)}+25+25')
         self.window.minsize(900,650);self.window.transient(parent);self.window.grab_set()
         outer=ttk.Frame(self.window,padding=18);outer.pack(fill='both',expand=True)
@@ -202,9 +294,9 @@ class QualityReviewWindow:
         ttk.Label(dates,text='Дата').grid(row=0,column=0,sticky='w',padx=(0,10))
         self.date=tk.StringVar();self.study_type=tk.StringVar()
         for value in (self.date,self.study_type):value.trace_add('write',self.changed)
-        ttk.Entry(dates,textvariable=self.date,width=16).grid(row=0,column=1,sticky='ew')
+        date_entry=ttk.Entry(dates,textvariable=self.date,width=16);date_entry.grid(row=0,column=1,sticky='ew')
         ttk.Label(dates,text='Вид').grid(row=1,column=0,sticky='w',padx=(0,10),pady=6)
-        ttk.Entry(dates,textvariable=self.study_type).grid(row=1,column=1,sticky='ew',pady=6)
+        study_entry=ttk.Entry(dates,textvariable=self.study_type);study_entry.grid(row=1,column=1,sticky='ew',pady=6)
         ttk.Label(fields,text='Показатели',font=(ui.FONT,12,'bold')).pack(anchor='w',pady=(8,4))
         self.rows=ttk.Treeview(fields,columns=('label','result','unit'),show='headings',height=5,selectmode='browse')
         for key,title,width in [('label','Показатель',190),('result','Результат',105),('unit','Ед.',75)]:
@@ -212,23 +304,36 @@ class QualityReviewWindow:
         self.rows.pack(fill='x');self.rows.bind('<<TreeviewSelect>>',self.locate);self.rows.bind('<Double-1>',lambda e:self.edit_row())
         buttons=ttk.Frame(fields);buttons.pack(fill='x',pady=(4,8))
         self.edit_button=ttk.Button(buttons,text='Исправить',command=self.edit_row);self.edit_button.pack(side='left')
-        ttk.Button(buttons,text='+ Строка',style='Link.TButton',command=self.add_row).pack(side='left')
-        ttk.Button(buttons,text='Убрать',style='Link.TButton',command=self.remove_row).pack(side='right')
+        add_button=ttk.Button(buttons,text='+ Строка',style='Link.TButton',command=self.add_row);add_button.pack(side='left')
+        remove_button=ttk.Button(buttons,text='Убрать',style='Link.TButton',command=self.remove_row);remove_button.pack(side='right')
         self.source_label=ttk.Label(fields,text='',wraplength=420,style='Muted.TLabel');self.source_label.pack(anchor='w',pady=(0,8))
         self.sections_button=ttk.Button(fields,text='Сверить текст заключения',command=self.edit_sections)
         self.sections_button.pack(anchor='w',pady=(0,8))
         ttk.Label(fields,text='Замечание / причина отсутствующих данных').pack(anchor='w')
         self.note=tk.Text(fields,height=3,wrap='word',font=(ui.FONT,11),relief='solid',borderwidth=1,padx=6,pady=6,bg='white',fg=ui.INK);self.note.pack(fill='x',pady=(4,6))
+        self.controls=(self.attest,date_entry,study_entry,self.edit_button,add_button,remove_button,
+                       self.sections_button,self.duplicate_button,self.details_button,self.alternatives_button,self.note)
         self.validation=tk.StringVar();ttk.Label(fields,textvariable=self.validation,foreground='#b42318',wraplength=420).pack(anchor='w')
         self.editor_area.canvas.bind('<Configure>',lambda event:[label.configure(wraplength=max(200,event.width-8)) for label in (self.issue_label,self.source_label)],add='+')
         self.success=ttk.Frame(outer,padding=40)
         ttk.Label(self.success,image=icons.get('check-circle','green',64)).pack(pady=15)
         ttk.Label(self.success,text='Данные проверены',style='Heading.TLabel').pack(pady=8)
         ttk.Label(self.success,text='Исправления и история сверки сохранены',style='Muted.TLabel').pack(pady=8)
-        ttk.Button(self.success,text='Вернуться к результатам',style='Primary.TButton',command=self.window.destroy).pack(pady=20)
+        ttk.Button(self.success,text='Вернуться к результатам',style='Primary.TButton',command=self.close).pack(pady=20)
         self.fill()
 
-    def enable_confirm(self):self.confirm_button.configure(state='normal' if self.selected and self.verified.get() else 'disabled')
+    def enable_confirm(self):
+        self.confirm_button.configure(state='normal' if self.selected and self.verified.get() and not self.saving else 'disabled')
+
+    def set_saving(self,saving):
+        self.saving=saving
+        self.list.configure(selectmode='none' if saving else 'browse')
+        for control in self.controls:control.configure(state='disabled' if saving else 'normal')
+        self.confirm_button.configure(text='Сохраняем данные…' if saving else 'Подтвердить данные')
+        self.enable_confirm()
+
+    def close(self):
+        if not self.actions.active:self.window.destroy()
 
     def changed(self,*args):self.verified.set(False);self.enable_confirm()
 
@@ -247,6 +352,9 @@ class QualityReviewWindow:
 
     def load(self,event=None):
         selected=self.list.selection()
+        if self.saving:
+            if selected!=(self.selected,):self.list.selection_set(self.selected)
+            return
         if not selected or selected[0] not in self.records or selected[0]==self.selected:return
         self.selected=selected[0];record=self.records[self.selected]
         self.observations=deepcopy(record['observations']);self.sections=deepcopy(record['analysis'].get('sections',[]));self.date.set(display_date(record['date']));self.study_type.set(record['type'])
@@ -279,6 +387,7 @@ class QualityReviewWindow:
         self.source_label.configure(text=f"Страница {o.get('page',1)}, строка {o.get('line','—')} · {o.get('raw','Ручной ввод')}")
 
     def edit_row(self):
+        if self.saving:return
         selected=self.rows.selection()
         if not selected:return
         index=int(selected[0])
@@ -286,44 +395,66 @@ class QualityReviewWindow:
         self.row_editor=ObservationEditor(self.window,self.observations[index],save)
 
     def add_row(self):
+        if self.saving:return
         def save(value):self.observations.append(value);self.fill_rows();self.verified.set(False);self.enable_confirm()
         try:date=parse_date(self.date.get())
         except ValueError as exc:self.validation.set(str(exc));return
         self.row_editor=ObservationEditor(self.window,{'page':self.preview.page+1,'line':0,'date':date,'date_source':'Ручной ввод','origin':'Ручной ввод'},save)
 
     def remove_row(self):
+        if self.saving:return
         selected=self.rows.selection()
         if selected and messagebox.askyesno('Убрать строку','Убрать ошибочно извлечённую строку? Предыдущий результат сохранится в истории сверки.',parent=self.window):
             self.observations.pop(int(selected[0]));self.fill_rows();self.verified.set(False);self.enable_confirm()
 
     def confirm(self):
-        if not self.selected or not self.verified.get():return
+        if self.actions.active or not self.selected or not self.verified.get():return
         try:
             date=parse_date(self.date.get());kind=self.study_type.get().strip();note=self.note.get('1.0','end').strip()
             from . import quality
-            draft=deepcopy(self.records[self.selected]['analysis']);draft.update(date=date,type=kind,observations=self.observations)
+            draft=dict(self.records[self.selected]['analysis'],date=date,type=kind,observations=self.observations)
             remaining={i['code'] for i in quality.assess(draft)['issues']}
             exceptions={'missing_date','unknown_type','missing_unit','unknown_unit','missing_result','lab_no_results','missing_narrative_result','unparsed_row','conflicting_date','conflicting_type','unmapped_columns'}
             if (not date or not kind or kind=='Документ' or not self.observations or remaining & exceptions) and not note:
                 raise ValueError('Остались замечания к полноте данных. Дополните поля или укажите причину в замечании. Для текстового заключения отметьте, что оно сверено.')
-            record=self.records[self.selected]
-            self.workspace.confirm_quality(self.selected,date=date,study_type=kind,observations=self.observations,sections=self.sections,note=note or 'Сверены все страницы и строки оригинала',expected_revision=record['revision'])
-            self.on_change();self.fill()
-        except ValueError as exc:self.validation.set(str(exc));self.editor_area.canvas.yview_moveto(1)
-        except Exception as exc:
-            messagebox.showerror('Не удалось сохранить проверку',str(exc),parent=self.window);self.on_change();self.fill()
+        except ValueError as exc:self.validation.set(str(exc));self.editor_area.canvas.yview_moveto(1);return
+        document_id=self.selected
+        revision=self.records[document_id]['revision']
+        observations,sections=deepcopy(self.observations),deepcopy(self.sections)
+
+        def work():
+            return self.workspace.confirm_quality(document_id,date=date,study_type=kind,observations=observations,
+                sections=sections,note=note or 'Сверены все страницы и строки оригинала',expected_revision=revision)
+
+        def completed(_value,error):
+            self.set_saving(False)
+            if isinstance(error,ValueError):
+                self.validation.set(str(error));self.editor_area.canvas.yview_moveto(1)
+                return
+            if error is None or isinstance(error,ReviewCommittedError):
+                self.on_change();self.fill()
+                if error is not None:
+                    messagebox.showwarning('Данные сохранены',str(error),parent=self.window)
+            else:
+                messagebox.showerror('Не удалось сохранить проверку',str(error),parent=self.window)
+
+        if self.actions.run(work,completed):
+            self.validation.set('')
+            self.set_saving(True)
 
     def compare_duplicate(self):
+        if self.actions.active or not self.selected:return
         record=self.records[self.selected]
         issue=next((i for i in record['issues'] if i['code']=='possible_duplicate'),{})
         target=next(iter(issue.get('related_ids',[])),None)
         if not target:
             messagebox.showinfo('Возможный дубль','Откройте «Все исследования» в меню «Папка данных», чтобы сравнить оригиналы. Сходство текста ещё не означает совпадение результатов.',parent=self.window);return
-        self.duplicate_window=DuplicateWindow(self.window,self.workspace,record,target,self.icons,self.duplicate_done)
+        self.duplicate_window=DuplicateWindow(self.window,self.workspace,record,target,self.icons,self.duplicate_done,actions=self.actions)
 
     def duplicate_done(self):self.on_change();self.fill()
 
     def edit_sections(self):
+        if self.saving:return
         window=tk.Toplevel(self.window);self.sections_window=window;window.title('Текст исследования');window.configure(bg='white');window.geometry('900x680');window.transient(self.window);window.grab_set()
         outer=ttk.Frame(window,padding=18);outer.pack(fill='both',expand=True)
         ttk.Label(outer,text='Сверьте текст с оригиналом',style='Heading.TLabel').pack(anchor='w',pady=(0,10))
@@ -377,34 +508,53 @@ class QualityReviewWindow:
 
 
 class DuplicateWindow:
-    def __init__(self,parent,workspace,record,target,icons,on_done):
+    def __init__(self,parent,workspace,record,target,icons,on_done,actions=None):
         self.workspace=workspace;self.record=record;self.target=target;self.on_done=on_done
         self.window=tk.Toplevel(parent);self.window.title('Сравнение документов');self.window.configure(bg='white')
+        self.actions=actions or ui.WorkspaceActions(self.window)
         self.window.geometry('1150x760');self.window.transient(parent);self.window.grab_set()
         self.window.protocol('WM_DELETE_WINDOW',self.close)
         outer=ttk.Frame(self.window,padding=18);outer.pack(fill='both',expand=True)
         ttk.Label(outer,text='Одинаковые исследования или разные результаты?',style='Heading.TLabel').pack(anchor='w',pady=(0,12))
         buttons=ttk.Frame(outer);buttons.pack(side='bottom',fill='x',pady=(12,0))
-        ttk.Button(buttons,text='Разные — продолжить сверку',command=self.close).pack(side='left')
-        ttk.Button(buttons,text='Это повтор того же исследования',command=self.confirm).pack(side='right')
+        self.cancel_button=ttk.Button(buttons,text='Разные — продолжить сверку',command=self.close);self.cancel_button.pack(side='left')
+        self.confirm_button=ttk.Button(buttons,text='Это повтор того же исследования',command=self.confirm);self.confirm_button.pack(side='right')
         panes=ttk.Panedwindow(outer,orient='horizontal');panes.pack(fill='both',expand=True)
         for docid in (record['id'],target):
             document=workspace.document(docid);preview=SourcePreview(panes,icons);panes.add(preview,weight=1);preview.load(document,json.loads(document['analysis']))
 
     def confirm(self):
-        try:
-            self.workspace.mark_duplicate(self.record['id'],self.target,'Оригиналы сверены: повтор того же исследования',expected_revision=self.record['revision'])
-            self.close();self.on_done()
-        except Exception as exc:messagebox.showerror('Не удалось отметить повтор',str(exc),parent=self.window)
+        if self.actions.active:return
+        document_id,target,revision=self.record['id'],self.target,self.record['revision']
+
+        def work():
+            return self.workspace.mark_duplicate(document_id,target,'Оригиналы сверены: повтор того же исследования',expected_revision=revision)
+
+        def completed(_value,error):
+            if error is None or isinstance(error,ReviewCommittedError):
+                parent=self.window.master
+                self.close();self.on_done()
+                if error is not None:
+                    messagebox.showwarning('Решение сохранено',str(error),parent=parent)
+                return
+            self.cancel_button.configure(state='normal')
+            self.confirm_button.configure(state='normal',text='Это повтор того же исследования')
+            messagebox.showerror('Не удалось отметить повтор',str(error),parent=self.window)
+
+        if self.actions.run(work,completed):
+            self.cancel_button.configure(state='disabled')
+            self.confirm_button.configure(state='disabled',text='Сохраняем решение…')
 
     def close(self):
+        if self.actions.active:return
         parent=self.window.master;self.window.destroy();parent.grab_set()
 
 
 class HistoryWindow:
-    def __init__(self,parent,workspace,on_change,icons):
-        self.workspace=workspace;self.on_change=on_change;self.icons=icons;self.worker=None;self.events=queue.Queue();self.candidate=None
+    def __init__(self,parent,workspace,on_change,icons,actions=None):
+        self.workspace=workspace;self.on_change=on_change;self.icons=icons;self.candidate=None
         self.window=tk.Toplevel(parent);self.window.title('Все исследования');self.window.configure(bg='white')
+        self.actions=actions or ui.WorkspaceActions(self.window)
         self.window.geometry('1040x700');self.window.minsize(850,600);self.window.transient(parent);self.window.grab_set();self.window.protocol('WM_DELETE_WINDOW',self.close)
         outer=ttk.Frame(self.window,padding=22);outer.pack(fill='both',expand=True)
         ttk.Label(outer,text='Все исследования',style='Heading.TLabel').pack(anchor='w')
@@ -416,7 +566,7 @@ class HistoryWindow:
         buttons=ttk.Frame(outer);buttons.pack(fill='x',pady=(12,0))
         self.open_button=ttk.Button(buttons,text='Открыть оригинал',command=self.open_original);self.open_button.pack(side='left')
         self.reprocess_button=ttk.Button(buttons,text='Распознать заново',command=self.reprocess);self.reprocess_button.pack(side='right')
-        self.fill();self.window.after(100,self.poll)
+        self.fill()
 
     def fill(self):
         for item in self.list.get_children():self.list.delete(item)
@@ -431,20 +581,28 @@ class HistoryWindow:
 
     def reprocess(self):
         selected=self.list.selection()
-        if not selected or (self.worker and self.worker.is_alive()):return
-        docid=selected[0];self.reprocess_button.configure(state='disabled');self.status.set('Повторно читаем сохранённый оригинал… Это может занять несколько минут.')
-        def work():
-            try:self.events.put(('ready',self.workspace.prepare_reprocess(docid)))
-            except Exception as exc:self.events.put(('error',str(exc)))
-        self.worker=threading.Thread(target=work,daemon=False);self.worker.start()
+        if not selected or self.candidate is not None or self.actions.active:return
+        document_id=selected[0]
 
-    def poll(self):
-        try:
-            kind,data=self.events.get_nowait();self.reprocess_button.configure(state='normal')
-            if kind=='error':self.status.set('Повторное распознавание не завершено.');messagebox.showerror('Не удалось распознать',data,parent=self.window)
-            else:self.status.set('Черновик готов. Сравните изменения перед применением.');self.show_candidate(data)
-        except queue.Empty:pass
-        if self.window.winfo_exists():self.window.after(100,self.poll)
+        def work():
+            return self.workspace.prepare_reprocess(document_id)
+
+        def completed(candidate,error):
+            self.list.configure(selectmode='browse')
+            self.open_button.configure(state='normal')
+            self.reprocess_button.configure(state='normal')
+            if error is not None:
+                self.status.set('Повторное распознавание не завершено.')
+                messagebox.showerror('Не удалось распознать',str(error),parent=self.window)
+            else:
+                self.status.set('Черновик готов. Сравните изменения перед применением.')
+                self.show_candidate(candidate)
+
+        if self.actions.run(work,completed):
+            self.list.configure(selectmode='none')
+            self.open_button.configure(state='disabled')
+            self.reprocess_button.configure(state='disabled')
+            self.status.set('Повторно читаем сохранённый оригинал… Это может занять несколько минут.')
 
     def show_candidate(self,candidate):
         self.candidate=candidate;win=tk.Toplevel(self.window);self.candidate_window=win;win.title('Результат повторного распознавания');win.configure(bg='white');win.geometry('1100x700');win.transient(self.window);win.grab_set();win.protocol('WM_DELETE_WINDOW',self.close_candidate)
@@ -453,7 +611,7 @@ class HistoryWindow:
         info='Подтверждённые вручную поля сохранены. '+ '; '.join(candidate.get('protected_fields',[])) if candidate.get('protected_fields') else 'Предыдущий результат останется в истории. Новый результат пройдёт проверки.'
         ttk.Label(outer,text=info,style='Muted.TLabel',wraplength=820).pack(anchor='w',pady=(0,12))
         buttons=ttk.Frame(outer);buttons.pack(side='bottom',fill='x',pady=(12,0))
-        ttk.Button(buttons,text='Оставить прежний результат',command=self.close_candidate).pack(side='left')
+        self.cancel_button=ttk.Button(buttons,text='Оставить прежний результат',command=self.close_candidate);self.cancel_button.pack(side='left')
         self.apply_button=ttk.Button(buttons,text='Применить черновик',style='Primary.TButton',command=self.apply);self.apply_button.pack(side='right')
         panes=ttk.Panedwindow(outer,orient='horizontal');panes.pack(fill='both',expand=True)
         for title,a in [('Сейчас',candidate['previous_analysis']),('Новое чтение',candidate['proposed_analysis']),('Будет сохранено',candidate['analysis'])]:
@@ -468,14 +626,37 @@ class HistoryWindow:
             text.configure(state='disabled')
 
     def apply(self):
-        try:
-            self.workspace.apply_reprocess(self.candidate['document_id'],self.candidate)
-            self.close_candidate();self.on_change();self.fill();self.status.set('Результат сохранён. Документы с замечаниями доступны в «Проверить документы».')
-        except Exception as exc:messagebox.showerror('Не удалось применить',str(exc),parent=self.candidate_window)
+        if self.actions.active or self.candidate is None:return
+        # No widget edits the candidate after it has been shown.
+        candidate=self.candidate
+        document_id=candidate['document_id']
+
+        def work():
+            return self.workspace.apply_reprocess(document_id,candidate)
+
+        def completed(_value,error):
+            if error is not None and not isinstance(error,ReviewCommittedError):
+                self.apply_button.configure(state='normal',text='Применить черновик')
+                self.cancel_button.configure(state='normal')
+                messagebox.showerror('Не удалось применить',str(error),parent=self.candidate_window)
+                return
+            self.close_candidate();self.on_change();self.fill()
+            if error is not None:
+                self.status.set('Результат сохранён в базе.')
+                messagebox.showwarning('Результат сохранён',str(error),parent=self.window)
+            else:
+                self.status.set('Результат сохранён. Документы с замечаниями доступны в «Проверить документы».')
+
+        if self.actions.run(work,completed):
+            self.apply_button.configure(state='disabled',text='Сохраняем результат…')
+            self.cancel_button.configure(state='disabled')
 
     def close_candidate(self):
+        if self.actions.active or self.candidate is None:return
         self.candidate_window.destroy();self.candidate=None;self.window.grab_set()
 
     def close(self):
-        if self.worker and self.worker.is_alive():self.status.set('Дождитесь завершения чтения оригинала. Исходные данные сохраняются.');return
+        if self.actions.active:
+            self.status.set('Дождитесь завершения операции. Исходные данные сохраняются.')
+            return
         self.window.destroy()

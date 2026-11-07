@@ -9,7 +9,7 @@ on:
 jobs:
   windows:
     runs-on: windows-2022
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
@@ -60,6 +60,49 @@ jobs:
           Get-FileHash $exe.FullName -Algorithm SHA256 | Format-List | Out-File dist/SHA256.txt
       - name: Test frozen automatic updater and data preservation
         run: python packaging/test_windows_update.py
+      - name: Prepare verified performance baseline
+        if: github.event_name != 'push'
+        shell: pwsh
+        run: |
+          git fetch --depth=1 origin tag v2.4.0
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot fetch performance baseline' }
+          $baselineCommit = git rev-parse 'v2.4.0^{commit}'
+          if ($baselineCommit -ne 'f17e5f46f32c9dbaa7aae98fb40e5f6c19c4ed7d') { throw 'Unexpected baseline source commit' }
+          $baselineZip = Join-Path $env:RUNNER_TEMP 'baseline-source.zip'
+          git archive --format=zip --output=$baselineZip v2.4.0
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot archive performance baseline' }
+          python -m zipfile -e $baselineZip "$env:RUNNER_TEMP/baseline-240"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot extract baseline source' }
+          $releaseZip = Join-Path $env:RUNNER_TEMP 'baseline-release.zip'
+          Invoke-WebRequest 'https://github.com/ovplotnikov/patient-study-importer/releases/download/v2.4.0/PatientStudyImporter-Windows.zip' -OutFile $releaseZip
+          if ((Get-FileHash $releaseZip -Algorithm SHA256).Hash.ToLower() -ne '3b65c1ae834c7a4f0fe6dc90d47f79bd8602c5f4e3d45bfb49f2e564584fc93f') { throw 'Baseline release checksum mismatch' }
+          python -m zipfile -e $releaseZip "$env:RUNNER_TEMP/baseline-release"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot extract baseline release' }
+      - name: Compare production paths on synthetic documents
+        if: github.event_name != 'push'
+        shell: pwsh
+        run: |
+          python packaging/compare_app_performance.py --baseline "$env:RUNNER_TEMP/baseline-240" --output performance-results/application.json
+          if ($LASTEXITCODE -ne 0) { throw 'Application performance comparison failed' }
+          python packaging/compare_registry_performance.py --baseline "$env:RUNNER_TEMP/baseline-240" --output performance-results/registry.json
+          if ($LASTEXITCODE -ne 0) { throw 'Registry performance comparison failed' }
+          python packaging/compare_diagnostics_performance.py --baseline "$env:RUNNER_TEMP/baseline-240" --output performance-results/diagnostics.json
+          if ($LASTEXITCODE -ne 0) { throw 'Diagnostic aggregation comparison failed' }
+          python packaging/compare_ocr_performance.py --baseline "$env:RUNNER_TEMP/baseline-240" --vendor vendor --tesseract vendor/tesseract/tesseract.exe --output performance-results/ocr.json
+          if ($LASTEXITCODE -ne 0) { throw 'OCR performance comparison failed' }
+          python packaging/compare_ui_performance.py --baseline "$env:RUNNER_TEMP/baseline-240" --output performance-results/interface.json
+          if ($LASTEXITCODE -ne 0) { throw 'Interface performance comparison failed' }
+          $baselineExe = Get-ChildItem "$env:RUNNER_TEMP/baseline-release" -Filter *.exe -Recurse | Select-Object -First 1
+          $candidateExe = Get-ChildItem dist/*.exe | Select-Object -First 1
+          python packaging/compare_frozen_performance.py --baseline-exe $baselineExe.FullName --candidate-exe $candidateExe.FullName --output performance-results/startup.json
+          if ($LASTEXITCODE -ne 0) { throw 'Frozen startup comparison failed' }
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event_name != 'push'
+        with:
+          name: performance-results
+          path: performance-results/
+          if-no-files-found: ignore
+          retention-days: 30
       - uses: actions/upload-artifact@v4
         with:
           name: interface-and-guide

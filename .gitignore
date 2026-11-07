@@ -5,6 +5,7 @@ build/
 dist/
 vendor/
 *.spec
+!packaging/windows.spec
 .DS_Store
 *.sqlite*
 *.xlsx

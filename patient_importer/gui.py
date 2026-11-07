@@ -11,9 +11,13 @@ import textwrap
 import tkinter as tk
 from tkinter import filedialog,messagebox,ttk
 import traceback
+from .pdf_render import PDFIUM_LOCK
 from .storage import Workspace
 from . import __version__,updater,intake,ui,diagnostics_config
 from .telemetry import Diagnostics
+
+
+DOCUMENTS_PER_PAGE = 25
 
 
 def open_path(path):
@@ -38,6 +42,12 @@ class Application:
         self.events=queue.Queue();self.worker=None;self.cancel=threading.Event();self.closing=False
         self.updating=False;self.update_cancel=threading.Event();self.pending_update=None;self.update_prompt_active=False
         self.working=False;self.screen='documents';self.batch=[];self.paths=[]
+        self.workspace_actions=ui.WorkspaceActions(self.root,can_start=self.can_start_workspace_action,
+                                                   can_present=lambda:not self.closing,
+                                                   on_idle=self.after_workspace_action)
+        self.documents_page=0;self.result_page=0;self.skipped_files=0
+        self.rendered_queue=None;self.focus_job=None;self.list_summary=None
+        self.result_needs_form_help=False
         self.workspace=None;self.review_window=None;self.problem_window=None;self.history_window=None
         self.settings=Path(os.environ.get('APPDATA',str(Path.home()/'.config')))/'PatientStudyImporter'/'settings.json'
         self.diagnostics=Diagnostics(self.settings.parent/'diagnostics',endpoint=diagnostics_config.TELEMETRY_URL)
@@ -70,6 +80,15 @@ class Application:
         self.phase_label=ttk.Label(self.frame,textvariable=self.phase,style='Muted.TLabel',wraplength=780);self.phase_label.pack(anchor='w',pady=(4,6))
         self.progress=ttk.Progressbar(self.frame,mode='determinate')
         self.current_label=ttk.Label(self.frame,textvariable=self.current,wraplength=780,style='Muted.TLabel')
+        self.pagination=ttk.Frame(self.frame)
+        self.page_range=ttk.Label(self.pagination,style='Muted.TLabel')
+        self.page_range.pack(side='left')
+        self.page_next=ttk.Button(self.pagination,text='Дальше ›',style='Link.TButton',
+                                  command=lambda:self.turn_list_page(1))
+        self.page_previous=ttk.Button(self.pagination,text='‹ Назад',style='Link.TButton',
+                                      command=lambda:self.turn_list_page(-1))
+        self.page_next.pack(side='right')
+        self.page_previous.pack(side='right',padx=(0,8))
         self.drop=ttk.Frame(self.frame,padding=(16,10),style='Drop.TFrame')
         self.drop.pack(side='bottom',fill='x',pady=(8,0))
         self.drop_label=ttk.Label(self.drop,text='Перетащите файлы сюда' if self.dnd else 'Добавьте файлы с компьютера',image=self.icons.get('download'),compound='left',style='Drop.TLabel');self.drop_label.pack(side='left')
@@ -98,8 +117,26 @@ class Application:
         self.root.after(60000,self.diagnostics_tick)
 
     def focus_refresh(self,event):
-        if event.widget is self.root and not self.working and self.screen=='documents':
-            self.root.after_idle(self.show_documents)
+        if (event.widget is self.root and not self.workspace_busy() and self.screen=='documents'
+                and self.focus_job is None):
+            self.focus_job=self.root.after_idle(self.refresh_focused_documents)
+
+    def refresh_focused_documents(self):
+        self.focus_job=None
+        if self.screen=='documents':self.show_documents()
+
+    def can_start_workspace_action(self):
+        return not (self.working or self.updating or self.update_prompt_active or self.closing)
+
+    def workspace_busy(self):
+        return self.workspace_actions.active or not self.can_start_workspace_action()
+
+    def workspace_window_open(self):
+        return any(window and window.window.winfo_exists()
+                   for window in (self.review_window,self.history_window,self.problem_window))
+
+    def after_workspace_action(self):
+        if self.closing:self.root.destroy()
 
     def set_step(self,index):
         for n,(label,icon) in enumerate(self.step_labels):
@@ -110,18 +147,23 @@ class Application:
         for button in [self.start_button,self.choose_button,self.review_button,self.add_button,self.add_folder_button,self.new_button,self.excel_button]:
             button.config(state='disabled' if value else 'normal')
         self.stop_button.config(state='normal' if value else 'disabled')
-        if not value and self.workspace:self.refresh()
+        if value:
+            self.page_previous.configure(state='disabled')
+            self.page_next.configure(state='disabled')
 
     def select(self,path):
+        if self.workspace_busy() or self.workspace_window_open():return
         try:
             workspace=Workspace(path,diagnostics=self.diagnostics)
             self.settings.parent.mkdir(parents=True,exist_ok=True)
             temporary=self.settings.with_suffix('.tmp');temporary.write_text(json.dumps({'workspace':str(workspace.root)},ensure_ascii=False),encoding='utf8');temporary.replace(self.settings)
             self.workspace=workspace;self.folder_var.set(str(workspace.root));self.batch=[]
+            self.documents_page=0;self.result_page=0;self.rendered_queue=None
             self.show_documents()
         except Exception as exc:messagebox.showerror('Не удалось открыть папку',str(exc),parent=self.root)
 
     def folder_menu(self):
+        if self.workspace_busy():return
         menu=tk.Menu(self.root,tearoff=False)
         menu.add_command(label='Открыть папку данных',command=lambda:self.open_folder(''))
         menu.add_command(label='Открыть «Входящие»',command=lambda:self.open_folder('Входящие'))
@@ -131,6 +173,7 @@ class Application:
         menu.tk_popup(self.choose_button.winfo_rootx(),self.choose_button.winfo_rooty())
 
     def choose(self):
+        if self.workspace_busy() or self.workspace_window_open():return
         selected=filedialog.askdirectory(title='Рабочая папка с базой и таблицей',initialdir=self.folder_var.get(),parent=self.root)
         if selected:self.select(selected)
 
@@ -147,52 +190,87 @@ class Application:
         ttk.Label(text,text=subtitle,style='Muted.TLabel',wraplength=650).pack(anchor='w',pady=(4,0))
         ttk.Separator(self.content.body).pack(fill='x')
 
-    def refresh(self):
-        if not self.workspace:return
-        summary=self.workspace.summary()
+    def visible_list_page(self,items,page):
+        page=max(0,min(page,(len(items)-1)//DOCUMENTS_PER_PAGE))
+        start=page*DOCUMENTS_PER_PAGE
+        end=min(len(items),start+DOCUMENTS_PER_PAGE)
+        if len(items)>DOCUMENTS_PER_PAGE:
+            self.page_range.configure(text=f'{start+1}–{end} из {len(items)}')
+            self.page_previous.configure(state='normal' if page else 'disabled')
+            self.page_next.configure(state='normal' if end<len(items) else 'disabled')
+            self.pagination.pack(fill='x',before=self.content,pady=(0,6))
+        else:self.pagination.pack_forget()
+        return page,items[start:end]
+
+    def turn_list_page(self,delta):
+        if self.workspace_busy():return
+        if self.screen=='documents':
+            self.documents_page+=delta
+            self.show_documents(rescan=False)
+        elif self.screen=='result':
+            self.result_page+=delta
+            self.show_result(self.list_summary,refresh_form_help=False)
+
+    def refresh(self,summary=None):
+        if not self.workspace or self.workspace_busy():return
+        if summary is None:summary=self.workspace.summary()
+        self.list_summary=summary
         self.metrics.set(f"В таблице · Документы: {summary['documents']} · Пациенты: {summary['patients']}")
-        self.excel_button.config(state='normal' if Path(summary['workbook']).exists() and not summary.get('pending_export') and not self.working else 'disabled')
-        self.review_button.config(state='normal' if summary['total_review'] and not self.working else 'disabled')
-        if self.screen=='result' and not self.working:self.show_result()
+        self.excel_button.config(state='normal' if Path(summary['workbook']).exists() and not summary.get('pending_export') else 'disabled')
+        self.review_button.config(state='normal' if summary['total_review'] else 'disabled')
+        if self.screen=='result':self.show_result(summary)
+        elif self.screen=='documents':
+            self.start_button.configure(
+                text=f'Обработать · {len(self.paths)}' if self.paths else 'Сохранить таблицу',
+                state='normal' if self.paths or summary['pending_moves'] or summary.get('pending_export') else 'disabled')
         return summary
 
-    def show_documents(self):
-        if self.working or not self.workspace:return
-        self.screen='documents';self.set_step(0);self.content.clear();self.excel_button.configure(style='TButton',image=self.icons.get('table'))
+    def show_documents(self,*,rescan=True):
+        if self.workspace_busy() or not self.workspace:return
+        self.screen='documents';self.set_step(0);self.excel_button.configure(style='TButton',image=self.icons.get('table'))
         self.progress.pack_forget();self.current_label.pack_forget()
         for b in [self.stop_button,self.review_button,self.new_button]:b.pack_forget()
         self.start_button.pack(side='right');self.drop.pack(side='bottom',fill='x',pady=(8,0),before=self.content)
-        self.paths,skipped=self.workspace.files()
+        if rescan:
+            self.paths,skipped=self.workspace.files()
+            self.skipped_files=len(skipped)
         self.heading.configure(text='Документы для обработки' if self.paths else 'Добавьте исследования')
-        self.phase.set(f'Файлов в очереди: {len(self.paths)}' if self.paths else 'PDF, Word, фотографии и сканы')
-        summary=self.workspace.summary()
-        self.start_button.configure(text=f'Обработать · {len(self.paths)}' if self.paths else 'Сохранить таблицу',state='normal' if self.paths or summary['pending_moves'] or summary.get('pending_export') else 'disabled')
+        phase=f'Файлов в очереди: {len(self.paths)}' if self.paths else 'PDF, Word, фотографии и сканы'
+        if self.skipped_files:phase+=f' · Других файлов: {self.skipped_files}'
+        self.phase.set(phase)
+        summary=self.refresh(None if rescan else self.list_summary)
+        self.documents_page,visible=self.visible_list_page(self.paths,self.documents_page)
+        attention=bool(summary['total_review'] or summary['errors'] or summary['pending_moves'] or summary.get('pending_export'))
+        rendered=(tuple(visible),attention,summary['total_review'],summary['errors'])
+        if rendered==self.rendered_queue:return
+        self.content.clear()
+        self.rendered_queue=rendered
         if not self.paths:
             empty=ttk.Frame(self.content.body,padding=(20,32));empty.pack(fill='x')
             ttk.Label(empty,image=self.icons.get('file-earmark','blue',64)).pack(pady=12)
             ttk.Label(empty,text='Ваши документы появятся здесь',style='Heading.TLabel').pack(pady=8)
             ttk.Label(empty,text='Выберите файлы или целую папку',style='Muted.TLabel').pack()
-        for path in self.paths:
+        for path in visible:
             self.row(path.name,path.suffix.upper().lstrip('.') or 'Документ',action=lambda p=path:self.remove_file(p))
-        summary=self.refresh()
-        if summary['total_review'] or summary['errors'] or summary['pending_moves'] or summary.get('pending_export'):
+        if attention:
             self.row('Требуют внимания',f"Проверить документы: {summary['total_review']} · Ошибки: {summary['errors']}",self.icons.get('exclamation-triangle','amber',32),self.show_result,'Посмотреть')
-        if skipped:self.phase.set(self.phase.get()+f' · Других файлов: {len(skipped)}')
 
     def add_files(self):
+        if self.workspace_busy() or self.workspace_window_open():return
         files=filedialog.askopenfilenames(title='Добавьте исследования',parent=self.root,filetypes=[('Бланки исследований','*.pdf *.docx *.txt *.jpg *.jpeg *.png *.tif *.tiff *.bmp'),('Все файлы','*')])
         if files:self.stage(files)
 
     def add_folder(self):
+        if self.workspace_busy() or self.workspace_window_open():return
         folder=filedialog.askdirectory(title='Папка с новыми исследованиями',parent=self.root)
         if folder:self.stage([folder])
 
     def on_drop(self,event):
-        if self.working:return 'none'
+        if self.workspace_busy() or self.workspace_window_open():return 'none'
         self.stage(self.root.tk.splitlist(event.data));return 'copy'
 
     def stage(self,paths):
-        if self.working:return
+        if not self.workspace or self.workspace_busy() or self.workspace_window_open():return
         self.cancel.clear();self.busy(True);self.phase.set('Добавляем файлы…')
         workspace=self.workspace
         def work():
@@ -206,17 +284,17 @@ class Application:
         self.worker=threading.Thread(target=work,daemon=False);self.worker.start()
 
     def remove_file(self,path):
-        if self.working:return
+        if self.workspace_busy() or self.workspace_window_open():return
         try:
             intake.defer_file(self.workspace,path);self.show_documents()
             self.phase.set('Файл убран из очереди. Копия сохранена в «Отложено».')
         except Exception as exc:messagebox.showerror('Не удалось убрать файл',str(exc),parent=self.root)
 
     def start(self):
-        if not self.workspace or self.working:return
+        if not self.workspace or self.workspace_busy() or self.workspace_window_open():return
         self.cancel.clear();self.busy(True);self.screen='processing';self.set_step(1)
         self.heading.configure(text='Обрабатываем документы');self.phase.set('Подготовка');self.current.set('')
-        self.content.clear();self.drop.pack_forget()
+        self.content.clear();self.rendered_queue=None;self.drop.pack_forget();self.pagination.pack_forget()
         for b in [self.start_button,self.review_button,self.new_button]:b.pack_forget()
         self.stop_button.configure(text='Остановить');self.stop_button.pack(side='right')
         self.progress.pack(fill='x',before=self.content,pady=(8,12));self.progress['value']=0
@@ -231,12 +309,18 @@ class Application:
                 self.events.put(('error',str(exc)))
         self.worker=threading.Thread(target=work,daemon=False);self.worker.start()
 
-    def show_result(self):
-        if self.working:return
-        self.screen='result';self.set_step(2);self.content.clear();self.drop.pack_forget()
+    def show_result(self,summary=None,*,refresh_form_help=True):
+        if self.workspace_busy() or not self.workspace:return
+        self.screen='result';self.set_step(2);self.content.clear();self.rendered_queue=None;self.drop.pack_forget()
         self.progress.pack_forget();self.current_label.pack_forget()
         for b in [self.start_button,self.stop_button,self.review_button,self.new_button]:b.pack_forget()
-        summary=self.workspace.summary();problems=summary['errors']+summary['pending_moves']
+        if summary is None:summary=self.workspace.summary()
+        self.list_summary=summary
+        if refresh_form_help:
+            self.result_needs_form_help=bool(summary['errors'] or (
+                summary['quality_review'] and self.workspace.has_serious_review_issue()))
+        problems=summary['errors']+summary['pending_moves']
+        self.result_page,visible=self.visible_list_page(self.batch,self.result_page)
         self.heading.configure(text='Нужно ваше внимание' if summary['total_review'] or problems or summary.get('pending_export') else 'Документы сохранены')
         self.phase.set(f"В таблице · Документы: {summary['documents']} · Пациенты: {summary['patients']}")
         if summary['total_review']:
@@ -251,28 +335,31 @@ class Application:
         if summary.get('incomplete'):self.row('Сверено с замечаниями',f"Документов: {summary['incomplete']} · Причины сохранены в таблице",self.icons.get('exclamation-triangle','amber',32),self.history,'Посмотреть')
         if summary.get('pending_export'):self.row('Таблица ожидает сохранения','Закройте Excel и повторите сохранение',self.icons.get('exclamation-triangle','amber',32),self.start,'Сохранить')
         if problems:self.row('Не все файлы обработаны','Откройте список, чтобы исправить ошибки',self.icons.get('exclamation-triangle','red',32),self.problems,'Разобрать')
-        from .support import has_serious_issue
-        if summary['errors'] or any(has_serious_issue(issue.get('code') for issue in item['issues'])
-                                   for item in self.workspace.quality_review_list()):
+        if self.result_needs_form_help:
             self.row('Бланк прочитан не полностью','Можно помочь добавить поддержку этого формата',
                      self.icons.get('question-circle','muted',32),self.help_with_form,'Как помочь')
         if self.batch:
+            from . import quality
+
             ttk.Label(self.content.body,text='Последняя обработка',font=(ui.FONT,13,'bold')).pack(anchor='w',pady=(20,6))
-            for item in self.batch:
+            changing={'Добавлен','Уточнить пациента','Проверить данные'}
+            documents=self.workspace.documents_by_ids(
+                item['document_id'] for item in visible if item['status'] in changing)
+            for item in visible:
                 status=item['status']
-                if status in {'Добавлен','Уточнить пациента','Проверить данные'}:
-                    try:
-                        from . import quality
-                        document=self.workspace.document(item['document_id']);parsed=json.loads(document['analysis'])
-                        status='Повтор' if parsed.get('duplicate_of') else 'Уточнить пациента' if not document['patient_id'] else 'Проверить данные' if quality.needs_review(parsed) else 'Сверено с замечаниями' if parsed.get('quality',{}).get('incomplete') else 'Добавлен'
+                document=documents.get(item.get('document_id'))
+                if status in changing and document is not None:
+                    try:parsed=json.loads(document['analysis'])
                     except ValueError:pass
+                    else:
+                        status='Повтор' if parsed.get('duplicate_of') else 'Уточнить пациента' if not document['patient_id'] else 'Проверить данные' if quality.needs_review(parsed) else 'Сверено с замечаниями' if parsed.get('quality',{}).get('incomplete') else 'Добавлен'
                 icon,color={'Добавлен':('check-circle','green'),'Повтор':('files','muted'),'Ошибка':('exclamation-triangle','red'),'Уточнить пациента':('exclamation-triangle','amber'),'Проверить данные':('exclamation-triangle','amber'),'Сверено с замечаниями':('exclamation-triangle','amber')}[status]
                 subtitle={'Добавлен':'Добавлен в таблицу','Повтор':'Повтор — уже есть в таблице','Ошибка':'Не удалось прочитать','Уточнить пациента':'Нужно уточнить пациента','Проверить данные':'Черновик · сверьте данные с оригиналом','Сверено с замечаниями':'Сверено с замечаниями · причины сохранены'}[status]
                 self.row(item['file'],subtitle,self.icons.get(icon,color,32))
         elif not summary['total_review'] and not problems and not summary.get('pending_export'):self.row('Всё готово','Можно открыть таблицу или добавить новые исследования',self.icons.get('check-circle','green',48))
 
     def problems(self):
-        if self.working:return
+        if self.workspace_busy() or self.workspace_window_open():return
         self.problem_window=ProblemsWindow(self.root,self.workspace,self.icons,self.after_retry)
 
     def after_retry(self):self.show_documents()
@@ -288,27 +375,30 @@ class Application:
                 kind,data=self.events.get_nowait()
                 if kind=='staging':self.phase.set('Добавляем: '+data)
                 elif kind=='staged':
-                    self.busy(False);self.show_documents()
+                    self.busy(False)
+                    if self.closing:self.root.destroy();return
+                    self.show_documents()
                     if data['errors'] or data['skipped']:
                         message=f"Добавлено: {len(data['added'])}. Других форматов: {len(data['skipped'])}. Ошибок: {len(data['errors'])}."
                         if data['errors']:message+='\n\n'+'\n'.join(item['file']+': '+item['reason'] for item in data['errors'][:8])
                         messagebox.showwarning('Не все файлы добавлены',message,parent=self.root)
-                    if self.closing:self.root.destroy();return
                 elif kind=='progress':
                     if 'phase' in data:self.phase.set(data['phase'])
                     if 'current' in data:self.current.set(data['current'])
                     if 'total' in data:self.progress['maximum']=max(1,data['total'])
                     if 'done' in data:self.progress['value']=data['done']
                 elif kind=='finished':
-                    self.batch=data.get('batch',[]);self.busy(False);self.show_result()
+                    self.batch=data.get('batch',[]);self.result_page=0;self.busy(False)
+                    if self.closing:self.root.destroy();return
+                    self.show_result(data)
                     self.send_diagnostics()
                     if self.cancel.is_set():self.phase.set(self.phase.get()+f" · Остановлено. Осталось: {data.get('remaining',0)}")
                     if data.get('skipped_files'):self.phase.set(self.phase.get()+f" · Других форматов: {data['skipped_files']}")
-                    if self.closing:self.root.destroy();return
                 elif kind=='error':
-                    self.busy(False);self.show_documents();self.phase.set('Обработка не завершена. Данные сохранены.')
-                    messagebox.showerror('Не удалось завершить',data,parent=self.root)
+                    self.busy(False)
                     if self.closing:self.root.destroy();return
+                    self.show_documents();self.phase.set('Обработка не завершена. Данные сохранены.')
+                    messagebox.showerror('Не удалось завершить',data,parent=self.root)
                 elif kind=='update_available':self.pending_update=data;self.root.after(0,self.offer_update)
                 elif kind=='update_progress':self.progress['value']=data;self.phase.set(f'Скачиваем обновление — {data}%')
                 elif kind=='update_error':
@@ -403,7 +493,7 @@ class Application:
         if self.workspace:open_path(self.workspace.root/name)
 
     def open_workbook(self):
-        if not self.workspace:return
+        if not self.workspace or self.workspace_busy():return
         if self.workspace.summary().get('pending_export'):
             self.show_documents();self.phase.set('Сначала сохраните актуальную таблицу. Закройте Excel и нажмите «Сохранить таблицу».');return
         path=self.workspace.root/'Исследования.xlsx'
@@ -420,20 +510,26 @@ class Application:
         menu.tk_popup(self.help_button.winfo_rootx(),self.help_button.winfo_rooty()+self.help_button.winfo_height())
 
     def review(self):
-        if not self.workspace or self.working:return
+        if not self.workspace or self.workspace_busy() or self.workspace_window_open():return
         if self.workspace.summary()['review']:
-            self.review_window=ReviewWindow(self.root,self.workspace,self.refresh,self.icons,on_next=self.review)
+            self.review_window=ReviewWindow(self.root,self.workspace,self.refresh,self.icons,
+                                            on_next=self.review,actions=self.workspace_actions)
         else:
             from .quality_ui import QualityReviewWindow
-            self.review_window=QualityReviewWindow(self.root,self.workspace,self.refresh,self.icons)
+            self.review_window=QualityReviewWindow(self.root,self.workspace,self.refresh,self.icons,
+                                                   actions=self.workspace_actions)
 
     def history(self):
-        if self.workspace and not self.working:
+        if self.workspace and not self.workspace_busy() and not self.workspace_window_open():
             from .quality_ui import HistoryWindow
-            self.history_window=HistoryWindow(self.root,self.workspace,self.refresh,self.icons)
+            self.history_window=HistoryWindow(self.root,self.workspace,self.refresh,self.icons,
+                                              actions=self.workspace_actions)
 
     def close(self):
-        if self.updating:
+        if self.workspace_actions.active or self.workspace_actions.presenting:
+            self.closing=True
+            self.phase.set('Закроем программу после завершения текущего действия…')
+        elif self.updating:
             if messagebox.askyesno('Скачивается обновление','Отменить загрузку и закрыть программу?',parent=self.root):self.closing=True;self.update_cancel.set()
         elif self.working:
             if messagebox.askyesno('Идёт обработка','Завершить текущий файл, сохранить результат и закрыть программу?',parent=self.root):self.closing=True;self.stop()
@@ -443,14 +539,18 @@ class Application:
 
 
 class ReviewWindow:
-    def __init__(self,parent,workspace,on_change,icons=None,on_next=None):
+    def __init__(self,parent,workspace,on_change,icons=None,on_next=None,actions=None):
         self.workspace=workspace;self.on_change=on_change;self.selected=None
         self.on_next=on_next
         self.icons=icons or ui.Icons(parent);self.preview_document=None;self.page=0;self.zoom=1.0
+        self.preview_image=None;self.preview_photo=None;self.preview_render_job=None
         self.window=tk.Toplevel(parent);self.window.title('Уточнение пациента');self.window.configure(bg='white')
+        self.actions=actions or ui.WorkspaceActions(self.window)
+        self.saving=False
         self.window.geometry(f'{min(1240,parent.winfo_screenwidth()-50)}x{min(850,parent.winfo_screenheight()-130)}+25+25')
         self.window.minsize(850,620);self.window.transient(parent);self.window.grab_set()
         self.window.protocol('WM_DELETE_WINDOW',self.close)
+        self.window.bind('<Destroy>',self.destroy_preview,add='+')
         outer=ttk.Frame(self.window,padding=22);outer.pack(fill='both',expand=True)
         self.title=ttk.Label(outer,text='Кому принадлежит документ?',style='Heading.TLabel');self.title.pack(anchor='w',pady=(0,12))
         self.window.bind('<Configure>',lambda e:self.title.configure(wraplength=max(500,e.width-44)) if e.widget is self.window else None)
@@ -486,7 +586,7 @@ class ReviewWindow:
         self.confirm_button.pack(side='bottom',fill='x',pady=(10,0))
         self.editor_area=ui.ScrollArea(self.right);self.editor_area.pack(fill='both',expand=True)
         self.candidate_area=ttk.Frame(self.editor_area.body);self.candidate_area.pack(fill='x')
-        self.candidates=[]
+        self.candidates=[];self.candidate_buttons=[]
         fields=ttk.Frame(self.editor_area.body);fields.pack(fill='x',pady=12)
         ttk.Label(fields,text='ФИО полностью').pack(anchor='w')
         self.name=tk.StringVar();self.birth=tk.StringVar()
@@ -505,10 +605,31 @@ class ReviewWindow:
         self.fill()
 
     def close(self):
-        if self.preview_document:self.preview_document.close();self.preview_document=None
+        if self.saving:
+            self.validation.set('Дождитесь сохранения решения.')
+            return
         self.window.destroy()
 
-    def fill(self):
+    def destroy_preview(self,event):
+        if event.widget is self.window:
+            self.close_preview()
+            self.preview_photo=None
+
+    def close_preview(self):
+        if self.preview_render_job is not None:
+            self.window.after_cancel(self.preview_render_job)
+            self.preview_render_job=None
+        if self.preview_document is not None:
+            with PDFIUM_LOCK:self.preview_document.close()
+            self.preview_document=None
+        self.preview_image=None
+
+    def clear_preview_canvas(self):
+        self.canvas.delete('all')
+        self.canvas.configure(scrollregion=(0,0,0,0))
+        self.preview_photo=None
+
+    def fill(self,summary=None):
         self.selected=None;self.name.set('');self.birth.set('');self.validation.set('')
         self.confirm_button.configure(state='disabled');self.original_button.configure(state='disabled')
         self.records={row['id']:row for row in self.workspace.review_list()}
@@ -519,16 +640,20 @@ class ReviewWindow:
             self.list.selection_set(next(iter(self.records)));self.load()
             self.title.configure(text=f'Кому принадлежит документ?  Осталось: {len(self.records)}')
         else:
-            if self.workspace.summary()['quality_review'] and self.on_next:
+            if self.on_next and (summary if summary is not None else self.workspace.summary())['quality_review']:
                 self.success_message.configure(text='Теперь сверьте результаты исследований с оригиналами')
                 self.next_button.configure(text='Проверить данные',command=self.next_review)
             self.list_frame.pack_forget();self.panes.pack_forget();self.title.pack_forget();self.success.pack(fill='both',expand=True)
 
     def next_review(self):
+        if self.saving:return
         parent=self.window.master;self.close();parent.after_idle(self.on_next)
 
     def load(self,event=None):
         selection=self.list.selection()
+        if self.saving:
+            if selection!=(self.selected,):self.list.selection_set(self.selected)
+            return
         if not selection or selection[0] not in self.records:return
         if selection[0]==self.selected:return
         self.selected=selection[0];record=self.records[self.selected]
@@ -537,12 +662,16 @@ class ReviewWindow:
         self.birth.set(datetime.strptime(analysis['births'][0],'%Y-%m-%d').strftime('%d.%m.%Y') if len(analysis['births'])==1 else '')
         self.validation.set('');self.confirm_button.configure(state='normal');self.original_button.configure(state='normal')
         for child in self.candidate_area.winfo_children():child.destroy()
+        self.candidate_buttons=[]
         self.editor_area.canvas.yview_moveto(0);self.candidates=record['candidates']
         ttk.Label(self.candidate_area,text='Возможные совпадения' if self.candidates else 'Введите данные из оригинала',font=(ui.FONT,12,'bold')).pack(anchor='w',pady=(0,10))
         for name,birth in self.candidates:
             day=datetime.strptime(birth,'%Y-%m-%d').strftime('%d.%m.%Y')
             frame=ttk.Frame(self.candidate_area,padding=(0,4));frame.pack(fill='x')
-            ttk.Button(frame,text='\n'.join(textwrap.wrap(name,24))+'\n'+day,command=lambda n=name,b=birth:self.use_candidate(n,b)).pack(fill='x')
+            button=ttk.Button(frame,text='\n'.join(textwrap.wrap(name,24))+'\n'+day,
+                              command=lambda n=name,b=birth:self.use_candidate(n,b))
+            button.pack(fill='x')
+            self.candidate_buttons.append(button)
             basis=[]
             if birth in record['births']:basis.append('дата рождения')
             if name in record['names']:basis.append('ФИО')
@@ -550,39 +679,53 @@ class ReviewWindow:
         self.show_preview(document,analysis)
 
     def use_candidate(self,name,birth):
+        if self.saving:return
         self.name.set(name);self.birth.set(datetime.strptime(birth,'%Y-%m-%d').strftime('%d.%m.%Y'));self.validation.set('')
         self.editor_area.canvas.yview_moveto(1)
 
     def show_preview(self,document,analysis):
         from PIL import Image
-        if self.preview_document:self.preview_document.close();self.preview_document=None
-        self.preview_image=None;self.page=0;self.zoom=1.0;path=Path(document['original'])
+        self.close_preview()
+        self.clear_preview_canvas()
+        self.page=0;self.zoom=1.0;path=Path(document['original'])
+        self.page_label.set('')
         self.canvas.pack_forget();self.text.pack_forget();self.preview_nav.pack_forget()
         self.text.configure(state='normal');self.text.delete('1.0','end')
-        self.text.insert('1.0','\n\n'.join(analysis['pages']));self.text.configure(state='disabled')
+        self.text.configure(state='disabled')
         try:
             if path.suffix.lower()=='.pdf':
                 import pypdfium2 as pdfium
-                self.preview_document=pdfium.PdfDocument(path)
+                with PDFIUM_LOCK:self.preview_document=pdfium.PdfDocument(path)
             elif path.suffix.lower() in {'.png','.jpg','.jpeg','.tif','.tiff','.bmp'}:
                 with Image.open(path) as image:self.preview_image=image.convert('RGB')
             else:raise ValueError('text preview')
             self.preview_title.configure(text='Оригинал документа');self.preview_nav.pack(fill='x',before=self.preview_area,pady=8)
             self.canvas.pack(fill='both',expand=True);self.text_scroll.configure(command=self.canvas.yview)
-            self.window.after_idle(self.render_preview)
+            self.preview_render_job=self.window.after_idle(self.render_scheduled_preview)
         except Exception:
+            self.close_preview()
             self.preview_title.configure(text='Извлечённый текст')
+            self.text.configure(state='normal');self.text.insert('1.0','\n\n'.join(analysis['pages']))
+            self.text.configure(state='disabled')
             self.text.pack(fill='both',expand=True);self.text_scroll.configure(command=self.text.yview)
+
+    def render_scheduled_preview(self):
+        self.preview_render_job=None
+        self.render_preview()
 
     def render_preview(self):
         from PIL import Image,ImageTk
         try:
             width=max(300,self.canvas.winfo_width()-24)
-            if self.preview_document:
-                page=self.preview_document[self.page]
-                bitmap=page.render(scale=min(3,width/page.get_width()*self.zoom))
-                image=bitmap.to_pil().copy();bitmap.close();page.close()
-                count=len(self.preview_document)
+            if self.preview_document is not None:
+                with PDFIUM_LOCK:
+                    page=self.preview_document[self.page]
+                    try:
+                        bitmap=page.render(scale=min(3,width/page.get_width()*self.zoom))
+                        try:image=bitmap.to_pil().copy()
+                        finally:bitmap.close()
+                    finally:page.close()
+                    count=len(self.preview_document)
             else:
                 image=self.preview_image.copy();count=1
                 image=image.resize((int(width*self.zoom),max(1,int(image.height*width*self.zoom/image.width))),Image.Resampling.LANCZOS)
@@ -590,30 +733,56 @@ class ReviewWindow:
             self.canvas.delete('all');self.canvas.create_image(12,8,anchor='nw',image=self.preview_photo)
             self.canvas.configure(scrollregion=(0,0,image.width+24,image.height+16));self.canvas.yview_moveto(0)
             self.page_label.set(f'{self.page+1} / {count}')
-        except Exception:self.page_label.set('Откройте оригинал')
+        except Exception:
+            self.clear_preview_canvas()
+            self.page_label.set('Откройте оригинал')
 
     def turn_page(self,delta):
-        if self.preview_document:self.page=max(0,min(len(self.preview_document)-1,self.page+delta));self.render_preview()
+        if self.preview_document is not None:
+            with PDFIUM_LOCK:self.page=max(0,min(len(self.preview_document)-1,self.page+delta))
+            self.render_preview()
 
     def resize_preview(self,delta):self.zoom=max(.5,min(2.5,self.zoom+delta));self.render_preview()
 
     def open_original(self):
         if self.selected:open_path(self.workspace.document(self.selected)['original'])
 
+    def set_saving(self,saving):
+        self.saving=saving
+        state='disabled' if saving else 'normal'
+        self.list.configure(selectmode='none' if saving else 'browse')
+        for button in [self.confirm_button,self.name_entry,self.birth_entry,*self.candidate_buttons]:
+            button.configure(state=state)
+        self.confirm_button.configure(text='Сохраняем…' if saving else 'Подтвердить пациента')
+        self.validation.set('Сохраняем решение и таблицу…' if saving else '')
+
+    def confirmation_error(self,error):
+        self.validation.set('Проверьте ФИО и дату (ДД.ММ.ГГГГ).\n'+str(error))
+        if not self.name.get().strip():self.name_entry.focus_set()
+        else:self.birth_entry.focus_set()
+
+    def complete_confirmation(self,summary,error):
+        self.set_saving(False)
+        if isinstance(error,ValueError):
+            self.confirmation_error(error)
+            return
+        if error is not None:
+            messagebox.showerror('Не удалось сохранить таблицу',str(error),parent=self.window)
+        self.on_change()
+        self.fill(summary)
+
     def confirm(self):
-        if not self.selected or self.selected not in self.records:return
+        if self.saving or not self.selected or self.selected not in self.records:return
         try:
             birth=datetime.strptime(self.birth.get().strip(),'%d.%m.%Y').date()
             if birth>datetime.now().date():raise ValueError('Дата рождения не может быть в будущем.')
-            self.workspace.assign(self.selected,self.name.get(),birth.isoformat())
-            self.on_change();self.fill()
         except ValueError as exc:
-            self.validation.set('Проверьте ФИО и дату (ДД.ММ.ГГГГ).\n'+str(exc))
-            if not self.name.get().strip():self.name_entry.focus_set()
-            else:self.birth_entry.focus_set()
-        except Exception as exc:
-            messagebox.showerror('Не удалось сохранить таблицу',str(exc),parent=self.window)
-            self.on_change();self.fill()
+            self.confirmation_error(exc)
+            return
+        workspace,document_id,name=self.workspace,self.selected,self.name.get()
+        birth_iso=birth.isoformat()
+        if self.actions.run(lambda:workspace.assign(document_id,name,birth_iso),self.complete_confirmation):
+            self.set_saving(True)
 
 
 class ProblemsWindow:

@@ -14,7 +14,7 @@ import portalocker
 
 from . import __version__
 from .telemetry_schema import (
-    COUNTERS_PATH, MAX_COUNT, MAX_REPORT_BYTES, METRICS, MIN_ATTEMPTS, SCHEMA_VERSION,
+    COUNTERS_PATH, MAX_COUNT, MAX_REPORT_BYTES, MIN_ATTEMPTS, SCHEMA_VERSION,
     valid_version, validate_counters, validate_report,
 )
 
@@ -188,14 +188,15 @@ class Diagnostics:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
 
-    def _load(self):
+    def _load(self, *, expected_epoch=None):
+        """Read state under lock. An existing operation must stay in its original scope."""
         if self._state.is_symlink():
             raise ValueError('Invalid diagnostics state')
         try:
             with self._state.open('rb') as source:
                 raw = source.read(MAX_STATE_BYTES + 1)
         except FileNotFoundError:
-            return self._empty()
+            return self._empty() if expected_epoch is None else None
         if len(raw) > MAX_STATE_BYTES:
             raise ValueError('Oversized diagnostics state')
         state = json.loads(raw.decode('utf-8'), object_pairs_hook=unique_object)
@@ -211,31 +212,46 @@ class Diagnostics:
         state['counters'] = validate_counters(state['counters'])
         if state['consent'] is not True and state['counters']:
             raise ValueError('Counters without consent')
-        if (state['schema_version'] != SCHEMA_VERSION or state['consent_version'] != CONSENT_VERSION
-                or state['endpoint'] != self._endpoint):
+        same_scope = (state['schema_version'] == SCHEMA_VERSION
+                      and state['consent_version'] == CONSENT_VERSION
+                      and state['endpoint'] == self._endpoint)
+        same_version = state['app_version'] == self._version
+        if expected_epoch is not None:
+            # A stale worker must not migrate or clear the current scope.
+            if (not same_scope or not same_version or state['consent'] is not True
+                    or state['epoch'] != expected_epoch):
+                return None
+            return state
+        if not same_scope:
             # A previous decision must not activate a new destination or consent scope.
             state = self._empty(False, epoch=self._next_epoch(state))
             self._write(state)
-        elif state['app_version'] != self._version:
+        elif not same_version:
             state = self._empty(state['consent'], state['last_attempt'], self._next_epoch(state))
             self._write(state)
         return state
 
     @staticmethod
     def _next_epoch(state):
-        # A local sequence guards the acknowledgement of an in-flight report.
-        # It is not included in the wire contract.
+        # The local sequence guards batches and acknowledgements across consent changes.
         return (state['epoch'] + 1) % (MAX_EPOCH + 1)
 
     @property
     def enabled(self):
+        return self.consent_epoch() is not None
+
+    def consent_epoch(self):
+        """Capture the local consent generation before starting a diagnostics event."""
         if not self.configured:
-            return False
+            return None
         try:
+            if not self._state.exists():
+                return None
             with self._lock():
-                return self._load()['consent'] is True
+                state = self._load()
+                return state['epoch'] if state['consent'] is True else None
         except Exception:
-            return False
+            return None
 
     def should_prompt(self):
         if not self.configured:
@@ -279,17 +295,31 @@ class Diagnostics:
             return False
 
     def record(self, metric, code, count=1):
-        if (not self.configured or type(metric) is not str or type(code) is not str
-                or type(count) is not int or not 1 <= count <= MAX_COUNT
-                or code not in METRICS.get(metric, ())):
+        if type(metric) is not str or type(code) is not str:
+            return False
+        return self._record_batch({metric: {code: count}})
+
+    def record_batch(self, counters, *, epoch):
+        """Store a batch only while the consent captured at its start still applies."""
+        if type(epoch) is not int or not 0 <= epoch <= MAX_EPOCH:
+            return False
+        return self._record_batch(counters, epoch=epoch)
+
+    def _record_batch(self, counters, *, epoch=None):
+        if not self.configured:
             return False
         try:
+            clean = validate_counters(counters)
+            if not clean:
+                return False
             with self._lock():
-                state = self._load()
-                if state['consent'] is not True:
+                state = self._load(expected_epoch=epoch)
+                if state is None or state['consent'] is not True:
                     return False
-                bucket = state['counters'].setdefault(metric, {})
-                bucket[code] = min(MAX_COUNT, bucket.get(code, 0) + count)
+                for metric, counts in clean.items():
+                    bucket = state['counters'].setdefault(metric, {})
+                    for code, count in counts.items():
+                        bucket[code] = min(MAX_COUNT, bucket.get(code, 0) + count)
                 self._write(state)
                 return True
         except Exception:
@@ -331,14 +361,13 @@ class Diagnostics:
                 # Cancel a reserved report if consent changed before dispatch.
                 # A request already in progress cannot be recalled.
                 with self._lock():
-                    state = self._load()
-                    if state['consent'] is not True or state['epoch'] != epoch:
+                    if self._load(expected_epoch=epoch) is None:
                         return False
                 if not post_report(self._endpoint, body):
                     return False
                 with self._lock(timeout=CONSENT_LOCK_TIMEOUT):
-                    state = self._load()
-                    if state['consent'] is not True or state['epoch'] != epoch:
+                    state = self._load(expected_epoch=epoch)
+                    if state is None:
                         return True
                     for metric, sent in report['counters'].items():
                         bucket = state['counters'].get(metric, {})
