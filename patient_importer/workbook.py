@@ -41,6 +41,12 @@ def rows_for(workspace,db):
     patients={r['id']:dict(r) for r in db.execute('SELECT * FROM patients')}
     documents=db.execute('SELECT * FROM documents ORDER BY created,id').fetchall()
     parsed_documents = [(document, workspace._load_analysis(document)) for document in documents]
+    originals = {}
+    for path in workspace.originals.glob('*'):
+        digest, extension_separator, _ = path.name.partition('.')
+        if extension_separator:
+            # Keep the first directory match, as the earlier per-hash glob did.
+            originals.setdefault(os.path.normcase(digest), path)
     counts=Counter(document['patient_id'] for document, parsed in parsed_documents if not parsed.get('duplicate_of'))
     for patient in sorted(patients.values(),key=lambda p:p['name']):
         if counts[patient['id']]:rows['Пациенты'].append([patient['id'],patient['name'],patient['birth'],counts[patient['id']]])
@@ -94,7 +100,7 @@ def rows_for(workspace,db):
                 rows['Тексты'].append([stable_id(sid,'page',page,part),sid,source_page,part,text[start:start+30000]])
         for arrival in db.execute('SELECT * FROM arrivals WHERE document_id=? ORDER BY id',(sid,)):
             destination=arrival['destination'] or str(workspace.destination(arrival))
-            preserved=next(workspace.originals.glob(arrival['hash']+'.*'),Path(document['original']))
+            preserved=originals.get(os.path.normcase(arrival['hash']), Path(document['original']))
             archive_path=Path(destination).relative_to(workspace.root).as_posix()
             original_path=preserved.relative_to(workspace.root).as_posix()
             rows['Источники'].append([str(arrival['id']),sid,arrival['hash'],Path(arrival['source']).name,archive_path,original_path,arrival['category'],arrival['created']])
@@ -128,10 +134,13 @@ def write_sheet(book,name,headers,rows,index):
             if isinstance(value,str) and column-1 not in date_columns:sheet.cell(row_no,column).data_type='s'
     sheet.freeze_panes='D2' if name=='Показатели' else 'B2'
     sheet.sheet_view.showGridLines=False
+    header_font = Font(name='Calibri', size=11, color='FFFFFF', bold=True)
+    header_fill = PatternFill('solid', fgColor='244C65')
+    header_alignment = Alignment(wrap_text=True, vertical='center')
     for cell in sheet[1]:
-        cell.font=Font(name='Calibri',size=11,color='FFFFFF',bold=True)
-        cell.fill=PatternFill('solid',fgColor='244C65')
-        cell.alignment=Alignment(wrap_text=True,vertical='center')
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_alignment
     sheet.row_dimensions[1].height=34
     for column,header in enumerate(headers+custom_headers,1):
         width=22
@@ -139,12 +148,16 @@ def write_sheet(book,name,headers,rows,index):
         if header in {'Подробности','Исходный фрагмент','Полный текст','Текст','Основание сопоставления','Архивный путь','Сохранённый оригинал'}:width=85
         if header in {'Показатель','Раздел','Референс','Заметки'}:width=38
         sheet.column_dimensions[sheet.cell(1,column).column_letter].width=width
+    plain_alignment = Alignment(vertical='top', wrap_text=False)
+    wrapped_alignment = Alignment(vertical='top', wrap_text=True)
     for row in sheet.iter_rows(min_row=2):
-        for cell in row:cell.alignment=Alignment(vertical='top',wrap_text=cell.column>3)
+        for cell in row:
+            cell.alignment = wrapped_alignment if cell.column > 3 else plain_alignment
         sheet.row_dimensions[row[0].row].height=32
     for column in date_columns:
         for cells in sheet.iter_rows(min_row=2,min_col=column+1,max_col=column+1):cells[0].number_format='dd.mm.yyyy'
-    for cells in sheet.iter_rows(min_row=2,min_col=1,max_col=1):cells[0].font=Font(name='Calibri',size=10,color='5F6C76')
+    id_font = Font(name='Calibri', size=10, color='5F6C76')
+    for cells in sheet.iter_rows(min_row=2,min_col=1,max_col=1):cells[0].font = id_font
     if rows:
         table=Table(displayName='ImportTable'+str(index),ref=sheet.dimensions)
         table.tableStyleInfo=TableStyleInfo(name='TableStyleMedium2',showRowStripes=True)
@@ -238,8 +251,9 @@ def export_workbook(workspace,db):
     summary.append(['Измерения из описаний','Сохраняются вместе с датой, стороной и исходным контекстом. Отметка «Проверить» означает необходимость сверки.'])
     summary.column_dimensions['A'].width=33;summary.column_dimensions['B'].width=95
     summary.sheet_view.showGridLines=False
+    summary_alignment = Alignment(wrap_text=True, vertical='center')
     for row in summary:
-        for cell in row:cell.alignment=Alignment(wrap_text=True,vertical='center')
+        for cell in row:cell.alignment = summary_alignment
         summary.row_dimensions[row[0].row].height=32
     for index,(name,headers) in enumerate(HEADERS.items(),1):write_sheet(book,name,headers,data[name],index)
     meta=book['_Программа'] if '_Программа' in book else book.create_sheet('_Программа')

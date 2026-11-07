@@ -1,7 +1,10 @@
 """Offline document readers and bundled OCR."""
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from dataclasses import asdict, replace
 from functools import lru_cache
 from pathlib import Path
+from threading import Lock
 from xml.etree import ElementTree
 import io
 import json
@@ -17,11 +20,19 @@ from PIL import Image, ImageOps, ImageSequence
 from pypdf import PdfReader
 
 from .ocr import Line, Page, open_rapid_engine, rapid_page, same_reading, tesseract_page
+from .pdf_render import PDFIUM_LOCK
 
 SUPPORTED = {'.pdf', '.docx', '.txt', '.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'}
 RASTER_SUFFIXES = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp', '.gif', '.webp', '.jp2'}
 PDF_RENDER_SCALE = 300 / 72
 MAX_RENDER_PIXELS = 18_000_000
+MAX_PARALLEL_OCR_PIXELS = 18_000_000
+PDF_OCR_CACHE_MAX_ENTRIES = 16
+PDF_OCR_CACHE_MAX_BYTES = 8 * 1024 * 1024
+
+# RapidOCR reuses a mutable engine. Import and manual reprocessing can each
+# call the extractor, so keep one active OCR page per process.
+_OCR_PAGE_LOCK = Lock()
 
 
 def resource_path(name):
@@ -56,25 +67,45 @@ def rapid_engine(model_dir):
 
 
 def recognize_image(image):
+    with _OCR_PAGE_LOCK:
+        return _recognize_image(image)
+
+
+def _recognize_image(image):
     image = ImageOps.exif_transpose(image).convert('RGB')
     model_dir = resource_path('rapidocr')
     executable = resource_path('tesseract/tesseract.exe' if os.name == 'nt' else 'tesseract/tesseract')
     paddle = None
     tesseract = None
     unavailable = []
-    if model_dir.is_dir() or (os.name == 'nt' and getattr(sys, 'frozen', False)):
-        try:
-            paddle = rapid_page(image, rapid_engine(model_dir), improve_geometry=True)
-        except Exception:
-            unavailable.append('PaddleOCR')
-    if executable.exists():
-        try:
-            tesseract = tesseract_page(image, executable, executable.parent / 'tessdata',
-                                       'tesseract-fast')
-        except RuntimeError:
+    bundled_windows = os.name == 'nt' and getattr(sys, 'frozen', False)
+    use_paddle = model_dir.is_dir() or bundled_windows
+    has_tesseract = executable.exists()
+    tesseract_args = executable, executable.parent / 'tessdata', 'tesseract-fast'
+    with ExitStack() as stack:
+        secondary = None
+        if use_paddle and has_tesseract and image.width * image.height <= MAX_PARALLEL_OCR_PIXELS:
+            # Tesseract only reads its own copy. Keep the worker scoped to the
+            # page and limit the extra RGB copy to 54 MB.
+            try:
+                worker = stack.enter_context(ThreadPoolExecutor(max_workers=1))
+                secondary = worker.submit(tesseract_page, image.copy(), *tesseract_args)
+            except (MemoryError, RuntimeError):
+                # If a worker cannot start, run the same two reads in order.
+                pass
+        if use_paddle:
+            try:
+                paddle = rapid_page(image, rapid_engine(model_dir), improve_geometry=True)
+            except Exception:
+                unavailable.append('PaddleOCR')
+        if has_tesseract:
+            try:
+                tesseract = (secondary.result() if secondary is not None
+                             else tesseract_page(image, *tesseract_args))
+            except RuntimeError:
+                unavailable.append('Tesseract')
+        elif bundled_windows:
             unavailable.append('Tesseract')
-    elif os.name == 'nt' and getattr(sys, 'frozen', False):
-        unavailable.append('Tesseract')
     if paddle and paddle.text.strip():
         alternatives = (tesseract,) if tesseract and not same_reading(paddle, tesseract) else ()
         return replace(paddle, alternatives=alternatives, unavailable=tuple(unavailable),
@@ -94,6 +125,18 @@ def recognize_image(image):
 def recognize_embedded(data):
     with Image.open(io.BytesIO(data)) as image:
         return recognize_image(image)
+
+
+def _cacheable_ocr_size(page):
+    """Estimate retained OCR bytes for a complete, nonempty two-engine read."""
+    if not isinstance(page, Page) or page.verification_engine is None:
+        return 0
+    readings = (page, *page.alternatives)
+    if any(reading.unavailable or not reading.text.strip() for reading in readings):
+        return 0
+    return sum(512 + sys.getsizeof(reading.text) +
+               sum(512 + sys.getsizeof(line.text) for line in reading.lines)
+               for reading in readings)
 
 
 def issue(result, code, message, page=None):
@@ -187,26 +230,33 @@ def pdf_pages(path):
                 issue(result, 'PDF_PAGE_EMPTY', 'Страница PDF не содержит читаемого текста', i)
     if targets:
         import pypdfium2 as pdfium
-        pdf = pdfium.PdfDocument(path)
+        with PDFIUM_LOCK:
+            pdf = pdfium.PdfDocument(path)
         try:
             for i in sorted(targets):
                 try:
-                    pdf_page = pdf[i-1]
-                    try:
-                        width, height = pdf_page.get_size()
-                        scale = min(PDF_RENDER_SCALE, (MAX_RENDER_PIXELS / (width * height)) ** .5)
-                        bitmap = pdf_page.render(scale=scale)
+                    with PDFIUM_LOCK:
+                        pdf_page = pdf[i-1]
                         try:
-                            image = bitmap.to_pil().copy()
+                            width, height = pdf_page.get_size()
+                            scale = min(PDF_RENDER_SCALE, (MAX_RENDER_PIXELS / (width * height)) ** .5)
+                            bitmap = pdf_page.render(scale=scale)
+                            try:
+                                image = bitmap.to_pil().copy()
+                            finally:
+                                bitmap.close()
                         finally:
-                            bitmap.close()
-                    finally:
-                        pdf_page.close()
+                            pdf_page.close()
                     add_recognition(result, recognize_image(image), i, replace=i-1)
                 except Exception:
                     issue(result, 'OCR_FAILED', 'Не удалось распознать страницу PDF', i)
         finally:
-            pdf.close()
+            with PDFIUM_LOCK:
+                pdf.close()
+    # Cache exact image bytes for this PDF read only. Page-specific decisions and
+    # evidence below are still evaluated separately for every occurrence.
+    embedded_ocr = {}
+    cache_bytes = 0
     for i, page in enumerate(reader.pages, 1):
         if i in targets:
             continue
@@ -217,7 +267,19 @@ def pdf_pages(path):
                 if data in seen:
                     continue
                 seen.add(data)
-                recognized = recognize_embedded(data)
+                recognized = embedded_ocr.get(data)
+                if recognized is None:
+                    recognized = recognize_embedded(data)
+                    if len(embedded_ocr) < PDF_OCR_CACHE_MAX_ENTRIES:
+                        try:
+                            size = _cacheable_ocr_size(recognized)
+                            total = size + sys.getsizeof(data)
+                            if size and cache_bytes + total <= PDF_OCR_CACHE_MAX_BYTES:
+                                embedded_ocr[data] = recognized
+                                cache_bytes += total
+                        except MemoryError:
+                            # A cache allocation must not discard a successful read.
+                            pass
             except Exception:
                 issue(result, 'EMBEDDED_IMAGE_UNREADABLE', 'Не удалось прочитать вложенное изображение PDF', i)
                 continue

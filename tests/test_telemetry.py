@@ -64,6 +64,85 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertFalse(updated.enabled)
             self.assertFalse(updated.record('formats', 'pdf'))
 
+    def test_batch_of_a_thousand_attempts_is_written_once(self):
+        self.enable()
+        epoch = self.diag.consent_epoch()
+        counters = {'formats': {'pdf': 1000}, 'outcomes': {'saved': 1000}}
+        with patch('patient_importer.telemetry.os.fsync', wraps=os.fsync) as fsync:
+            self.assertTrue(self.diag.record_batch(counters, epoch=epoch))
+            fsync.assert_called_once()
+        self.assertEqual(self.diag.snapshot()['counters'], counters)
+        self.assertTrue(self.diag.record_batch({'formats': {'pdf': MAX_COUNT}}, epoch=epoch))
+        self.assertEqual(self.diag.snapshot()['counters']['formats'], {'pdf': MAX_COUNT})
+
+    def test_batch_without_consent_does_not_write(self):
+        counters = {'formats': {'pdf': 10}}
+        self.assertIsNone(self.diag.consent_epoch())
+        self.assertFalse(self.diag.record_batch(counters, epoch=None))
+        self.assertFalse(self.folder.exists())
+        self.enable()
+        epoch = self.diag.consent_epoch()
+        self.assertTrue(self.diag.set_consent(False))
+        before = self.state.read_bytes()
+        with patch.object(self.diag, '_write') as write:
+            self.assertIsNone(self.diag.consent_epoch())
+            self.assertFalse(self.diag.record_batch(counters, epoch=epoch))
+            write.assert_not_called()
+        self.assertEqual(self.state.read_bytes(), before)
+
+    def test_batch_rejects_the_entire_input_if_any_counter_is_invalid(self):
+        self.enable()
+        epoch = self.diag.consent_epoch()
+        before = self.state.read_bytes()
+        for counters in (
+            {}, [], {'formats': {}}, {'formats': {'pdf': 10}, 'notes': {CANARY: 1}},
+            {'formats': {'pdf': 10}, 'outcomes': {CANARY: 1}},
+            {'formats': {'pdf': 10}, 'outcomes': {'saved': True}},
+            {'formats': {'pdf': 10}, 'outcomes': {'saved': 0}},
+            {'formats': {'pdf': 10}, 'outcomes': {'saved': MAX_COUNT + 1}},
+            {'formats': {'pdf': 10}, 'outcomes': {'saved': '10'}},
+        ):
+            with self.subTest(counters=counters):
+                self.assertFalse(self.diag.record_batch(counters, epoch=epoch))
+        self.assertFalse(self.diag.record_batch({'formats': {'pdf': 10}}, epoch=True))
+        self.assertEqual(self.state.read_bytes(), before)
+
+    def test_batch_checks_for_reconsent_after_waiting_for_the_lock(self):
+        self.enable()
+        old_epoch = self.diag.consent_epoch()
+        other = Diagnostics(self.folder, URL, app_version=VERSION)
+        acquire_lock = self.diag._lock
+
+        def revoke_before_lock():
+            self.assertTrue(other.set_consent(False))
+            self.assertTrue(other.set_consent(True))
+            return acquire_lock()
+
+        with patch.object(self.diag, '_lock', side_effect=revoke_before_lock):
+            self.assertFalse(self.diag.record_batch({'formats': {'pdf': 10}}, epoch=old_epoch))
+        self.assertIsNone(self.diag.snapshot())
+        new_epoch = other.consent_epoch()
+        self.assertNotEqual(new_epoch, old_epoch)
+        self.assertTrue(other.record_batch({'formats': {'docx': 2}}, epoch=new_epoch))
+        self.assertEqual(other.snapshot()['counters'], {'formats': {'docx': 2}})
+
+    def test_stale_batch_does_not_change_new_version_or_destination_state(self):
+        for endpoint, version in ((URL, '2.5.0'), ('https://second.example.com/v1/counters', VERSION)):
+            with self.subTest(endpoint=endpoint, version=version), tempfile.TemporaryDirectory() as directory:
+                old = Diagnostics(Path(directory), URL, app_version=VERSION)
+                self.assertTrue(old.set_consent(True))
+                old_epoch = old.consent_epoch()
+                current = Diagnostics(Path(directory), endpoint, app_version=version)
+                self.assertTrue(current.set_consent(True))
+                current_epoch = current.consent_epoch()
+                self.assertNotEqual(current_epoch, old_epoch)
+                counters = {'formats': {'docx': 2}}
+                self.assertTrue(current.record_batch(counters, epoch=current_epoch))
+                self.assertFalse(current.record_batch({'formats': {'pdf': 10}}, epoch=old_epoch))
+                self.assertFalse(old.record_batch({'formats': {'pdf': 10}}, epoch=old_epoch))
+                self.assertEqual(current.consent_epoch(), current_epoch)
+                self.assertEqual(current.snapshot()['counters'], counters)
+
     def test_outbound_only_independent_counters(self):
         self.enable()
         for metric, code, count in ((CANARY, 'pdf', 10), ('formats', CANARY, 10),
@@ -245,15 +324,16 @@ class DiagnosticsTests(unittest.TestCase):
         self.enable()
         self.diag.record('formats', 'pdf', 10)
         second = Diagnostics(self.folder, URL, app_version=VERSION)
+        batch = {'formats': {'pdf': 2, 'docx': 1}, 'outcomes': {'saved': 3}}
 
         def transport(endpoint, body):
             self.assertFalse(second.send_if_due())
-            self.assertTrue(second.record('formats', 'pdf', 2))
+            self.assertTrue(second.record_batch(batch, epoch=second.consent_epoch()))
             return True
 
         with patch('patient_importer.telemetry.post_report', side_effect=transport):
             self.assertTrue(self.diag.send_if_due())
-        self.assertEqual(self.diag.snapshot()['counters'], {'formats': {'pdf': 2}})
+        self.assertEqual(self.diag.snapshot()['counters'], batch)
 
     def test_withdrawal_does_not_wait_for_running_send(self):
         self.enable()
@@ -301,6 +381,20 @@ class DiagnosticsTests(unittest.TestCase):
         with patch('patient_importer.telemetry.post_report', side_effect=transport):
             self.assertTrue(self.diag.send_if_due())
         self.assertEqual(self.diag.snapshot()['counters'], {'formats': {'pdf': 12}})
+
+    def test_old_acknowledgement_does_not_reset_new_version_state(self):
+        self.enable()
+        self.diag.record('formats', 'pdf', 10)
+        new = Diagnostics(self.folder, URL, app_version='2.5.0')
+        counters = {'formats': {'pdf': 12}}
+
+        def transport(endpoint, body):
+            self.assertTrue(new.record_batch(counters, epoch=new.consent_epoch()))
+            return True
+
+        with patch('patient_importer.telemetry.post_report', side_effect=transport):
+            self.assertTrue(self.diag.send_if_due())
+        self.assertEqual(new.snapshot()['counters'], counters)
 
 
 DEPLOYMENT = 'AKfycbx_Synthetic-Deployment-test'

@@ -120,8 +120,12 @@ def analyze(extracted, filename):
     day = date_candidates[0] if len(date_candidates) == 1 else None
     kind, type_candidates = classify_pages(pages)
     laboratory, pending = laboratory_rows(pages)
+    dates_by_page = {}
     for row in laboratory:
-        local = document_date(pages[row['page'] - 1])
+        page_index = row['page'] - 1
+        if page_index not in dates_by_page:
+            dates_by_page[page_index] = document_date(pages[page_index])
+        local = dates_by_page[page_index]
         row_day = local or day
         from_ocr = row['page'] in ocr_pages
         row.update(
@@ -164,8 +168,14 @@ def resolve(analyses, known_patients):
         a=item['analysis']
         if len(a['names'])==1 and len(a['births'])==1 and len(a['names'][0].split())==3 and not a['identity_from_ocr']:
             keys.add((a['names'][0],a['births'][0]))
-    compact=defaultdict(set)
-    for name,birth in keys:compact[(name.replace(' ',''),birth)].add((name,birth))
+    compact = defaultdict(set)
+    by_name = defaultdict(set)
+    by_birth = defaultdict(set)
+    for name, birth in keys:
+        pair = (name, birth)
+        compact[(name.replace(' ', ''), birth)].add(pair)
+        by_name[name].add(pair)
+        by_birth[birth].add(pair)
     votes=defaultdict(Counter)
     results={}
     for item in analyses:
@@ -178,7 +188,12 @@ def resolve(analyses, known_patients):
         if a['identity_from_ocr']:
             reason='Подтвердите ФИО и дату рождения, распознанные со скана';key=None
         if not key:
-            candidates=[(name,birth) for name,birth in sorted(keys) if birth in a['births'] or name in a['names']]
+            matching = set()
+            for name in a['names']:
+                matching.update(by_name.get(name, ()))
+            for birth in a['births']:
+                matching.update(by_birth.get(birth, ()))
+            candidates = sorted(matching)
         if key:votes[item['folder']][key]+=1
         results[item['id']]={'key':key,'reason':reason,'candidates':candidates}
     dominant={}
