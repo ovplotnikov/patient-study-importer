@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import time
 from unittest.mock import patch
+from urllib.parse import unquote
 
 
 def run(root):
@@ -203,6 +204,7 @@ def run(root):
     from . import diagnostics_config
     from .telemetry import Diagnostics
     from .diagnostics_ui import DiagnosticsWindow, SupportWindow
+    support_email=diagnostics_config.SUPPORT_EMAIL or 'templates@example.org'
     diagnostics_example='https://script.google.com/macros/s/AKfycb_TEST_DIAGNOSTICS_ONLY_00000000000000000000/exec/v1/counters'
     test_diagnostics=Diagnostics(settings_dir/'test-diagnostics', endpoint=diagnostics_example)
     assert test_diagnostics.should_prompt() and test_diagnostics.mark_prompted()
@@ -224,15 +226,17 @@ def run(root):
     assert not test_diagnostics.enabled and test_diagnostics.snapshot() is None
     next_version=Diagnostics(settings_dir/'test-diagnostics',endpoint=diagnostics_example,app_version='2.5.0')
     assert not next_version.should_prompt() and not next_version.enabled
-    dialog=SupportWindow(app.root,'templates@example.org');settle()
+    dialog=SupportWindow(app.root,support_email);settle()
     visible(dialog.mail_button);visible(dialog.attest)
     assert str(dialog.mail_button['state'])=='disabled'
     capture('12-template-help.png',dialog.window)
     with patch('patient_importer.diagnostics_ui.webbrowser.open',return_value=True) as compose:
         dialog.compose();compose.assert_not_called()
         dialog.attest.invoke();dialog.mail_button.invoke()
-        assert compose.call_count==1 and compose.call_args.args[0].startswith('mailto:templates@example.org?')
-        assert 'attach' not in compose.call_args.args[0]
+        assert compose.call_count==1
+        mailto=compose.call_args.args[0]
+        assert unquote(mailto.split('?',1)[0])==f'mailto:{support_email}'
+        assert 'attach' not in mailto
     dialog.window.destroy()
     app.root.destroy()
     # 144 DPI (150% at the usual 96-DPI baseline), fresh Tcl interpreter.
@@ -244,7 +248,7 @@ def run(root):
     dialog=DiagnosticsWindow(app.root,test_diagnostics,diagnostics_example)
     settle();visible(dialog.allow_button);visible(dialog.decline_button)
     capture('diagnostics-150-percent.png',dialog.window);dialog.window.destroy()
-    dialog=SupportWindow(app.root,'templates@example.org');settle()
+    dialog=SupportWindow(app.root,support_email);settle()
     visible(dialog.mail_button);visible(dialog.attest)
     capture('template-help-150-percent.png',dialog.window);dialog.window.destroy()
     app.stage([first,third]);finish();app.start();finish();app.review();settle()
