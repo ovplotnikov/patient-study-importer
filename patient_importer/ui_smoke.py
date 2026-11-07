@@ -18,7 +18,7 @@ def run(root):
     from .gui import Application
     from .smoke import SAMPLE
     from . import __version__,updater
-    from PIL import Image,ImageGrab
+    from PIL import Image,ImageGrab,ImageDraw,ImageFont
     from docx import Document
     app=Application()
     errors=[]
@@ -51,7 +51,26 @@ def run(root):
     external=root/'external files';external.mkdir(exist_ok=True)
     first=external/'Анализ крови.txt';first.write_text(SAMPLE,encoding='utf8')
     second=external/'УЗИ почек.docx';doc=Document();doc.add_paragraph(SAMPLE.replace('02.03.2025','03.03.2025'));doc.save(second)
-    third=external/'Исследование.txt';third.write_text('Дата рождения: 01.01.2000\nЗаключение: учебный пример. Настоящих данных нет.',encoding='utf8')
+    third=external/'Исследование.png'
+    synthetic_text=SAMPLE.replace('71.5','<0,05')
+    original=Image.new('RGB',(1650,1250),'white');draw=ImageDraw.Draw(original)
+    font_path='C:/Windows/Fonts/consola.ttf' if os.name=='nt' else '/System/Library/Fonts/Menlo.ttc'
+    font=ImageFont.truetype(font_path,26)
+    draw.text((40,40),'УЧЕБНЫЙ БЛАНК · СИНТЕТИЧЕСКИЕ ДАННЫЕ',font=font,fill='#586779')
+    for index,line in enumerate(synthetic_text.splitlines()):draw.text((40,120+index*60),line,font=font,fill='black')
+    original.save(third)
+    # This test exercises the review UI with a deterministic OCR error. Real
+    # bundled OCR is measured separately by the self-test and benchmark.
+    from . import extraction
+    real_extract=extraction.extract
+    def ui_extraction(path):
+        if Path(path).suffix=='.png' and Path(path).read_bytes()==third.read_bytes():
+            text=synthetic_text.replace('мкмоль/л','мкмоль/π')
+            return {'pages':[text],'native_pages':[''],'page_numbers':[1],'ocr_pages':[1],
+                    'format':'Изображение','ocr_evidence':[],'ocr_alternatives':[],
+                    'extraction_issues':[{'code':'OCR_USED','message':'Сверьте распознанные со скана данные с оригиналом','page':1}]}
+        return real_extract(path)
+    ocr_patch=patch.object(extraction,'extract',side_effect=ui_extraction);ocr_patch.start()
     # Native DnD registration and Tcl-escaped names with spaces; use the real callback.
     if os.name=='nt':
         assert app.dnd
@@ -97,10 +116,44 @@ def run(root):
     with app.workspace.connect() as db:after=db.execute("SELECT count(*) FROM events WHERE kind='patient_confirmed'").fetchone()[0]
     assert before==after==1
     capture('04-confirmed.png',review.window)
-    review.close();settle()
+    review.next_button.invoke();settle()
     assert app.workspace.summary()['review']==0
+    assert app.workspace.summary()['quality_review']==1
+    assert app.heading.cget('text')=='Нужно ваше внимание','Identity approval must not approve results'
+    quality=app.review_window
+    assert quality.selected and str(quality.confirm_button['state'])=='disabled'
+    visible(quality.confirm_button);visible(quality.attest)
+    capture('07-quality-review.png',quality.window)
+    quality.window.geometry('900x650');settle();visible(quality.confirm_button);visible(quality.attest)
+    capture('quality-small-window.png',quality.window)
+    quality.window.geometry(f'{min(1240,app.root.winfo_screenwidth()-50)}x{min(850,app.root.winfo_screenheight()-130)}');settle()
+    quality.rows.selection_set('0');quality.edit_button.invoke();settle()
+    editor=quality.row_editor;assert editor.fields['result'].get()=='<0,05'
+    editor.fields['unit'].set('мкмоль/л');capture('08-field-editor.png',editor.window)
+    visible(editor.save_button);editor.save_button.invoke();settle()
+    assert quality.observations[0]['unit']=='мкмоль/л' and quality.observations[0]['number'] is None
+    quality.note.insert('1.0','Сверены все строки учебного оригинала; единица измерения исправлена.')
+    quality.attest.invoke();settle();assert str(quality.confirm_button['state'])=='normal'
+    quality.confirm_button.invoke();settle()
+    assert quality.selected is None and not quality.records
+    assert app.workspace.summary()['total_review']==0
+    capture('09-quality-finished.png',quality.window);quality.window.destroy();settle()
     assert app.heading.cget('text')=='Документы сохранены'
     capture('05-finished.png')
+    app.history();settle();history=app.history_window
+    native_id=next(r['id'] for r in history.records.values() if r['filename']=='Анализ крови.txt')
+    history.list.selection_set(native_id);history.reprocess_button.invoke()
+    deadline=time.monotonic()+60
+    while history.candidate is None:
+        settle();time.sleep(.04);assert time.monotonic()<deadline,'Reprocess draft timeout'
+    capture('10-history.png',history.candidate_window)
+    visible(history.apply_button);history.apply_button.invoke();settle()
+    assert app.workspace.summary()['documents']==3 and app.workspace.summary()['total_review']==0
+    history.close();settle()
+    with app.workspace.connect() as db:app.workspace.touch(db)
+    app.refresh();settle();assert str(app.excel_button['state'])=='disabled','Stale workbook must not look current'
+    app.show_documents();settle();assert str(app.start_button['state'])=='normal'
+    app.start();finish();assert str(app.excel_button['state'])=='normal'
     assert all(p.exists() for p in [first,second,third]),'External originals changed'
     app.show_documents();app.stage([first]);finish();app.start();finish()
     assert app.workspace.summary()['documents']==3 and app.batch[0]['status']=='Повтор'
@@ -160,7 +213,39 @@ def run(root):
     assert candidate.winfo_rooty()+candidate.winfo_height()<=app.review_window.editor_area.canvas.winfo_rooty()+app.review_window.editor_area.canvas.winfo_height()
     candidate.invoke();settle();visible(app.review_window.name_entry)
     capture('review-fields-150-percent.png',app.review_window.window)
-    app.review_window.close();app.show_documents();capture('main-150-percent.png')
+    app.review_window.use_candidate(*app.review_window.candidates[0]);app.review_window.confirm();settle()
+    app.review_window.next_button.invoke();settle()
+    capture('quality-150-percent.png',app.review_window.window)
+    visible(app.review_window.confirm_button);visible(app.review_window.attest)
+    app.review_window.window.destroy();app.show_documents();capture('main-150-percent.png')
+    # Native text corrections and explicit duplicate review use the same UI APIs.
+    app.select(root/'review-extras');settle()
+    narrative=external/'Заключение.txt'
+    narrative.write_text('Пациент: ТЕСТОВ ТЕСТ ТЕСТОВИЧ\nДата рождения: 01.01.2000\nУЗИ почек\nЗаключение: учебная ошибка распознавания.',encoding='utf8')
+    app.stage([narrative]);finish();app.start();finish();app.review();settle()
+    quality=app.review_window;quality.edit_sections();settle()
+    quality.sections_editors[-1].delete('1.0','end');quality.sections_editors[-1].insert('1.0','Заключение: учебный текст сверён и исправлен.')
+    quality.sections_save_button.invoke();settle()
+    quality.date.set('02.03.2025');quality.note.insert('1.0','Текст заключения сверён; числовых показателей нет.')
+    quality.attest.invoke();quality.confirm_button.invoke();settle()
+    assert not quality.records
+    with app.workspace.connect() as db:
+        parsed=json.loads(db.execute('SELECT analysis FROM documents').fetchone()[0])
+        assert parsed['sections'][-1]['text']=='Заключение: учебный текст сверён и исправлен.'
+    quality.window.destroy();app.select(root/'duplicate-extras');settle()
+    original_text=SAMPLE.replace('мкмоль/л','мкмоль/π')
+    pair=[]
+    for index in range(2):
+        path=external/f'Сравнение {index}.txt';path.write_text(original_text.replace('Пациент: ','Пациент: '+' '*index),encoding='utf8');pair.append(path)
+    app.stage(pair);finish();app.start();finish();app.review();settle()
+    quality=app.review_window
+    duplicate=next(r for r in quality.records.values() if any(i['code']=='possible_duplicate' for i in r['issues']))
+    quality.list.selection_set(duplicate['id']);quality.load();quality.compare_duplicate();settle()
+    assert quality.duplicate_window.window.winfo_exists()
+    quality.duplicate_window.confirm();settle()
+    assert app.workspace.summary()['documents']==1 and app.workspace.summary()['duplicates']==1
+    quality.window.destroy()
     app.root.destroy()
-    result={'ok':True,'checks':['empty_state','picker_or_native_drop_callback','external_originals_preserved','same_patient_incremental_import','per_file_results','small_window_buttons','wheel_over_row','150_percent_layout','visible_candidates','pdf_preview_pages_zoom','confirmation_clears_selection','repeat_confirmation_blocked','consistent_result_state','deduplication','actionable_errors','retry_returns_to_queue','stop_and_resume','automatic_update_offer_decline','embedded_help' if getattr(sys,'frozen',False) else 'source_capture']}
+    ocr_patch.stop()
+    result={'ok':True,'checks':['empty_state','picker_or_native_drop_callback','external_originals_preserved','same_patient_incremental_import','per_file_results','small_window_buttons','wheel_over_row','150_percent_layout','visible_candidates','pdf_preview_pages_zoom','confirmation_clears_selection','repeat_confirmation_blocked','consistent_result_state','quality_stays_pending_after_identity','explicit_quality_attestation','inequality_and_corrected_unit_preserved','quality_small_window_and_150_percent','reprocess_preview_apply_same_study','stale_workbook_requires_save','narrative_text_correction','manual_duplicate_comparison','deduplication','actionable_errors','retry_returns_to_queue','stop_and_resume','automatic_update_offer_decline','embedded_help' if getattr(sys,'frozen',False) else 'source_capture']}
     (root/'ui-test.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf8')

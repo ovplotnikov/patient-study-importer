@@ -37,7 +37,7 @@ class Application:
         self.events=queue.Queue();self.worker=None;self.cancel=threading.Event();self.closing=False
         self.updating=False;self.update_cancel=threading.Event();self.pending_update=None
         self.working=False;self.screen='documents';self.batch=[];self.paths=[]
-        self.workspace=None;self.review_window=None;self.problem_window=None
+        self.workspace=None;self.review_window=None;self.problem_window=None;self.history_window=None
         self.settings=Path(os.environ.get('APPDATA',str(Path.home()/'.config')))/'PatientStudyImporter'/'settings.json'
         self.frame=ttk.Frame(self.root,padding=(28,16));self.frame.pack(fill='both',expand=True)
         header=ttk.Frame(self.frame);header.pack(fill='x',pady=(0,12))
@@ -119,6 +119,7 @@ class Application:
         menu.add_command(label='Открыть папку данных',command=lambda:self.open_folder(''))
         menu.add_command(label='Открыть «Входящие»',command=lambda:self.open_folder('Входящие'))
         menu.add_command(label='Открыть отложенные файлы',command=lambda:self.open_folder('Отложено'))
+        menu.add_command(label='Все исследования…',command=self.history)
         menu.add_separator();menu.add_command(label='Выбрать другую папку…',command=self.choose)
         menu.tk_popup(self.choose_button.winfo_rootx(),self.choose_button.winfo_rooty())
 
@@ -143,8 +144,8 @@ class Application:
         if not self.workspace:return
         summary=self.workspace.summary()
         self.metrics.set(f"В таблице · Документы: {summary['documents']} · Пациенты: {summary['patients']}")
-        self.excel_button.config(state='normal' if Path(summary['workbook']).exists() and not self.working else 'disabled')
-        self.review_button.config(state='normal' if summary['review'] and not self.working else 'disabled')
+        self.excel_button.config(state='normal' if Path(summary['workbook']).exists() and not summary.get('pending_export') and not self.working else 'disabled')
+        self.review_button.config(state='normal' if summary['total_review'] and not self.working else 'disabled')
         if self.screen=='result' and not self.working:self.show_result()
         return summary
 
@@ -157,7 +158,8 @@ class Application:
         self.paths,skipped=self.workspace.files()
         self.heading.configure(text='Документы для обработки' if self.paths else 'Добавьте исследования')
         self.phase.set(f'Файлов в очереди: {len(self.paths)}' if self.paths else 'PDF, Word, фотографии и сканы')
-        self.start_button.configure(text=f'Обработать · {len(self.paths)}',state='normal' if self.paths or self.workspace.summary()['pending_moves'] else 'disabled')
+        summary=self.workspace.summary()
+        self.start_button.configure(text=f'Обработать · {len(self.paths)}' if self.paths else 'Сохранить таблицу',state='normal' if self.paths or summary['pending_moves'] or summary.get('pending_export') else 'disabled')
         if not self.paths:
             empty=ttk.Frame(self.content.body,padding=(20,32));empty.pack(fill='x')
             ttk.Label(empty,image=self.icons.get('file-earmark','blue',64)).pack(pady=12)
@@ -166,8 +168,8 @@ class Application:
         for path in self.paths:
             self.row(path.name,path.suffix.upper().lstrip('.') or 'Документ',action=lambda p=path:self.remove_file(p))
         summary=self.refresh()
-        if summary['review'] or summary['errors'] or summary['pending_moves']:
-            self.row('Требуют внимания',f"Уточнить пациента: {summary['review']} · Ошибки: {summary['errors']}",self.icons.get('exclamation-triangle','amber',32),self.show_result,'Посмотреть')
+        if summary['total_review'] or summary['errors'] or summary['pending_moves'] or summary.get('pending_export'):
+            self.row('Требуют внимания',f"Проверить документы: {summary['total_review']} · Ошибки: {summary['errors']}",self.icons.get('exclamation-triangle','amber',32),self.show_result,'Посмотреть')
         if skipped:self.phase.set(self.phase.get()+f' · Других файлов: {len(skipped)}')
 
     def add_files(self):
@@ -223,29 +225,34 @@ class Application:
         self.progress.pack_forget();self.current_label.pack_forget()
         for b in [self.start_button,self.stop_button,self.review_button,self.new_button]:b.pack_forget()
         summary=self.workspace.summary();problems=summary['errors']+summary['pending_moves']
-        self.heading.configure(text='Нужно ваше внимание' if summary['review'] or problems else 'Документы сохранены')
+        self.heading.configure(text='Нужно ваше внимание' if summary['total_review'] or problems or summary.get('pending_export') else 'Документы сохранены')
         self.phase.set(f"В таблице · Документы: {summary['documents']} · Пациенты: {summary['patients']}")
-        if summary['review']:
+        if summary['total_review']:
             self.excel_button.configure(style='TButton',image=self.icons.get('table'))
-            self.review_button.configure(text=f"Уточнить пациента · {summary['review']}",state='normal');self.review_button.pack(side='right')
+            self.review_button.configure(text=f"Проверить документы · {summary['total_review']}",state='normal');self.review_button.pack(side='right')
             self.new_button.pack(side='right',padx=10)
         else:
             self.new_button.pack(side='right');self.excel_button.configure(style='Primary.TButton',image=self.icons.get('table','white'))
-        self.excel_button.configure(state='normal' if Path(summary['workbook']).exists() else 'disabled')
+        self.excel_button.configure(state='normal' if Path(summary['workbook']).exists() and not summary.get('pending_export') else 'disabled')
         if summary['review']:self.row('Уточните пациента',f"Документов: {summary['review']}",self.icons.get('exclamation-triangle','amber',32),self.review,'Проверить')
+        if summary['quality_review']:self.row('Сверьте данные с оригиналом',f"Документов: {summary['quality_review']} · Показатели пока не подтверждены",self.icons.get('exclamation-triangle','amber',32),self.review,'Проверить')
+        if summary.get('incomplete'):self.row('Сверено с замечаниями',f"Документов: {summary['incomplete']} · Причины сохранены в таблице",self.icons.get('exclamation-triangle','amber',32),self.history,'Посмотреть')
+        if summary.get('pending_export'):self.row('Таблица ожидает сохранения','Закройте Excel и повторите сохранение',self.icons.get('exclamation-triangle','amber',32),self.start,'Сохранить')
         if problems:self.row('Не все файлы обработаны','Откройте список, чтобы исправить ошибки',self.icons.get('exclamation-triangle','red',32),self.problems,'Разобрать')
         if self.batch:
             ttk.Label(self.content.body,text='Последняя обработка',font=(ui.FONT,13,'bold')).pack(anchor='w',pady=(20,6))
             for item in self.batch:
                 status=item['status']
-                if status=='Уточнить пациента':
+                if status in {'Добавлен','Уточнить пациента','Проверить данные'}:
                     try:
-                        if self.workspace.document(item['document_id'])['patient_id']:status='Добавлен'
+                        from . import quality
+                        document=self.workspace.document(item['document_id']);parsed=json.loads(document['analysis'])
+                        status='Повтор' if parsed.get('duplicate_of') else 'Уточнить пациента' if not document['patient_id'] else 'Проверить данные' if quality.needs_review(parsed) else 'Сверено с замечаниями' if parsed.get('quality',{}).get('incomplete') else 'Добавлен'
                     except ValueError:pass
-                icon,color={'Добавлен':('check-circle','green'),'Повтор':('files','muted'),'Ошибка':('exclamation-triangle','red'),'Уточнить пациента':('exclamation-triangle','amber')}[status]
-                subtitle={'Добавлен':'Добавлен в таблицу','Повтор':'Повтор — уже есть в таблице','Ошибка':'Не удалось прочитать','Уточнить пациента':'Нужно уточнить пациента'}[status]
+                icon,color={'Добавлен':('check-circle','green'),'Повтор':('files','muted'),'Ошибка':('exclamation-triangle','red'),'Уточнить пациента':('exclamation-triangle','amber'),'Проверить данные':('exclamation-triangle','amber'),'Сверено с замечаниями':('exclamation-triangle','amber')}[status]
+                subtitle={'Добавлен':'Добавлен в таблицу','Повтор':'Повтор — уже есть в таблице','Ошибка':'Не удалось прочитать','Уточнить пациента':'Нужно уточнить пациента','Проверить данные':'Черновик · сверьте данные с оригиналом','Сверено с замечаниями':'Сверено с замечаниями · причины сохранены'}[status]
                 self.row(item['file'],subtitle,self.icons.get(icon,color,32))
-        elif not summary['review'] and not problems:self.row('Всё готово','Можно открыть таблицу или добавить новые исследования',self.icons.get('check-circle','green',48))
+        elif not summary['total_review'] and not problems and not summary.get('pending_export'):self.row('Всё готово','Можно открыть таблицу или добавить новые исследования',self.icons.get('check-circle','green',48))
 
     def problems(self):
         if self.working:return
@@ -314,8 +321,8 @@ class Application:
 
     def offer_update(self):
         if self.closing or not self.pending_update:return
-        review=getattr(self,'review_window',None);problem=getattr(self,'problem_window',None)
-        if (self.worker and self.worker.is_alive()) or self.updating or (review and review.window.winfo_exists()) or (problem and problem.window.winfo_exists()):
+        windows=[getattr(self,name,None) for name in ('review_window','problem_window','history_window')]
+        if (self.worker and self.worker.is_alive()) or self.updating or any(w and w.window.winfo_exists() for w in windows):
             self.root.after(2000,self.offer_update);return
         release=self.pending_update;self.pending_update=None
         if not messagebox.askyesno('Доступно обновление',f'Доступна версия {release.tag.lstrip("v")} (установлена {__version__}).\n\nСкачать, установить и перезапустить программу сейчас?\nИсследования, таблица и выбранная рабочая папка сохранятся.',parent=self.root):return
@@ -342,6 +349,8 @@ class Application:
 
     def open_workbook(self):
         if not self.workspace:return
+        if self.workspace.summary().get('pending_export'):
+            self.show_documents();self.phase.set('Сначала сохраните актуальную таблицу. Закройте Excel и нажмите «Сохранить таблицу».');return
         path=self.workspace.root/'Исследования.xlsx'
         if path.exists():
             try:open_path(path)
@@ -352,7 +361,17 @@ class Application:
         open_help(self.root)
 
     def review(self):
-        if self.workspace and not self.working:self.review_window=ReviewWindow(self.root,self.workspace,self.refresh,self.icons)
+        if not self.workspace or self.working:return
+        if self.workspace.summary()['review']:
+            self.review_window=ReviewWindow(self.root,self.workspace,self.refresh,self.icons,on_next=self.review)
+        else:
+            from .quality_ui import QualityReviewWindow
+            self.review_window=QualityReviewWindow(self.root,self.workspace,self.refresh,self.icons)
+
+    def history(self):
+        if self.workspace and not self.working:
+            from .quality_ui import HistoryWindow
+            self.history_window=HistoryWindow(self.root,self.workspace,self.refresh,self.icons)
 
     def close(self):
         if self.updating:
@@ -365,8 +384,9 @@ class Application:
 
 
 class ReviewWindow:
-    def __init__(self,parent,workspace,on_change,icons=None):
+    def __init__(self,parent,workspace,on_change,icons=None,on_next=None):
         self.workspace=workspace;self.on_change=on_change;self.selected=None
+        self.on_next=on_next
         self.icons=icons or ui.Icons(parent);self.preview_document=None;self.page=0;self.zoom=1.0
         self.window=tk.Toplevel(parent);self.window.title('Уточнение пациента');self.window.configure(bg='white')
         self.window.geometry(f'{min(1240,parent.winfo_screenwidth()-50)}x{min(850,parent.winfo_screenheight()-130)}+25+25')
@@ -420,9 +440,9 @@ class ReviewWindow:
             entry.bind('<FocusIn>',lambda e:self.editor_area.canvas.yview_moveto(1))
         self.success=ttk.Frame(outer,padding=40)
         ttk.Label(self.success,image=self.icons.get('check-circle','green',64)).pack(pady=15)
-        ttk.Label(self.success,text='Все документы уточнены',style='Heading.TLabel').pack(pady=8)
-        ttk.Label(self.success,text='Изменения сохранены в таблице',style='Muted.TLabel').pack(pady=8)
-        ttk.Button(self.success,text='Вернуться к результатам',style='Primary.TButton',command=self.close).pack(pady=20)
+        ttk.Label(self.success,text='Пациенты уточнены',style='Heading.TLabel').pack(pady=8)
+        self.success_message=ttk.Label(self.success,text='Изменения сохранены в таблице',style='Muted.TLabel');self.success_message.pack(pady=8)
+        self.next_button=ttk.Button(self.success,text='Вернуться к результатам',style='Primary.TButton',command=self.close);self.next_button.pack(pady=20)
         self.fill()
 
     def close(self):
@@ -440,7 +460,13 @@ class ReviewWindow:
             self.list.selection_set(next(iter(self.records)));self.load()
             self.title.configure(text=f'Кому принадлежит документ?  Осталось: {len(self.records)}')
         else:
+            if self.workspace.summary()['quality_review'] and self.on_next:
+                self.success_message.configure(text='Теперь сверьте результаты исследований с оригиналами')
+                self.next_button.configure(text='Проверить данные',command=self.next_review)
             self.list_frame.pack_forget();self.panes.pack_forget();self.title.pack_forget();self.success.pack(fill='both',expand=True)
+
+    def next_review(self):
+        parent=self.window.master;self.close();parent.after_idle(self.on_next)
 
     def load(self,event=None):
         selection=self.list.selection()

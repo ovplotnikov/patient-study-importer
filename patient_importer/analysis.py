@@ -6,14 +6,21 @@ import json
 import re
 import unicodedata
 
-from .parsing import identity, laboratory_rows, document_date, normalized, iso_date, study_type
+from .parsing import (
+    COMPARATOR, POWER, RANGE, SCALAR, classify_pages, document_date,
+    document_dates, identity, iso_date, laboratory_header, laboratory_rows,
+    normalized, numeric_value,
+)
+from .quality import assess
 
-PARSER_VERSION='2.0.0'
-SECTIONS=re.compile(r'^(Жалобы|Анамнез(?: заболевания| жизни)?|Объективный статус|Объективно|Диагноз[^:]*|Клинический диагноз|Заключение[^:]*|Рекомендации[^:]*|Лечение|Назначения|Проведенные обследования|Результаты[^:]*|Осмотр)\s*:',re.I)
-NUMBER=r'[<>≤≥]?\s*\d+(?:[.,]\d+)?(?:\s*[-–]\s*\d+(?:[.,]\d+)?)*'
-UNITS=r'(?:мкмоль/л|ммоль/л|мл/мин(?:/1[.,]73\s*м[²2])?|мм\s*рт\.?\s*ст\.?|г/л|г/сут|мг/л|мг/сут|мл|мм|см|кг|%|мм/ч|10\^?9/л)'
-MEASUREMENT=re.compile(rf'(?P<value>{NUMBER})\s*(?P<unit>{UNITS})(?![а-я])',re.I)
-DIMENSIONS=re.compile(r'(\d+(?:[.,]\d+)?(?:\s*[xх×*]\s*\d+(?:[.,]\d+)?){1,2})\s*(мм|см)?',re.I)
+PARSER_VERSION='2.3.0'
+SECTIONS=re.compile(r'^(Жалобы|Анамнез(?: заболевания| жизни)?|Объективный статус|Объективно|Диагноз[^:]*|Клинический диагноз|Заключение[^:]*|Рекомендации[^:]*|Лечение|Назначения|Проведенные обследования|Результаты[^:]*|Описание[^:]*|Осмотр)\s*:',re.I)
+NUMBER = rf'(?:{COMPARATOR}\s*)?{SCALAR}(?:{POWER}|{RANGE})'
+NUMBER_START = r'(?<![\w.,<>≤≥+−–^×·⋅-])'
+UNITS = r'(?:мкмоль/л|ммоль/л|мл/мин(?:/1[.,]73\s*м[²2])?|мм\s*рт\.?\s*ст\.?|г/л|г/сут|мг/л|мг/сут|мл|мм/ч|мм|см|кг|%|10\^?9/л)'
+MEASUREMENT = re.compile(rf'{NUMBER_START}(?P<value>{NUMBER})\s*(?P<unit>{UNITS})(?![\w/])', re.I)
+DIMENSIONS = re.compile(rf'{NUMBER_START}({SCALAR}(?:\s*[xх×*]\s*{SCALAR}){{1,2}})(?![\d.,^])\s*(мм|см)?', re.I)
+
 DATE_PATTERN=re.compile(r'\b(\d{2}\.\d{2}\.\d{4})\b')
 
 
@@ -21,12 +28,6 @@ def content_fingerprint(pages):
     # Every character/number remains part of the fingerprint; only whitespace changes.
     text=' '.join(unicodedata.normalize('NFC',' '.join(pages)).split())
     return hashlib.sha256(text.encode()).hexdigest() if text else None
-
-
-def number(value):
-    if re.fullmatch(r'\d+(?:[.,]\d+)?',value.strip()):
-        return float(value.strip().replace(',','.'))
-    return None
 
 
 def side_from(text):
@@ -55,7 +56,7 @@ def narrative(pages, day, ocr_pages):
     values=[];sections=[]
     for page_no,page in enumerate(pages,1):
         # Laboratory fields are already extracted by the layout parser.
-        if 'Показатель' in page and 'Результат' in page:
+        if any(laboratory_header(line) for line in page.splitlines()):
             continue
         page_day=document_date(page) or day
         section='Описание исследования';context_date=page_day;date_source='Дата документа';context=''
@@ -100,34 +101,60 @@ def narrative(pages, day, ocr_pages):
                 local_dates=[match for match in dates if match.end()<start]
                 local_day=iso_date(local_dates[-1][1]) if local_dates else context_date
                 status='Проверить' if page_no in ocr_pages or not local_day or metric=='Измерение из описания' else 'Извлечено'
-                values.append({'page':page_no,'line':index,'section':section,'label':metric,'result':result,'number':number(result),
+                values.append({'page':page_no,'line':index,'section':section,'label':metric,'result':result,'number':numeric_value(result),
                                'unit':unit,'reference':'','raw':clean,'flag':'','comment':'','side':side,'date':local_day,
-                               'date_source':date_source,'origin':'Анамнез' if historical else 'Описание','status':status})
+                               'date_source':date_source,'origin':'Анамнез' if historical else 'Описание',
+                               'status':status,'from_ocr':page_no in ocr_pages})
             context=(context+' '+clean)[-200:]
         flush()
     return values,sections
 
 
 def analyze(extracted, filename):
-    pages=extracted['pages'];ocr_pages=extracted['ocr_pages']
-    names,births,cards=identity(pages)
-    native_names,native_births,_=identity(extracted.get('native_pages',[text for i,text in enumerate(pages,1) if i not in ocr_pages]))
-    day=document_date('\n'.join(pages))
-    laboratory,pending=laboratory_rows(pages)
+    pages = extracted['pages']
+    ocr_pages = extracted['ocr_pages']
+    names, births, cards = identity(pages)
+    native = extracted.get('native_pages', [text for i, text in enumerate(pages, 1) if i not in ocr_pages])
+    native_names, native_births, _ = identity(native)
+    date_candidates = document_dates('\n'.join(pages))
+    day = date_candidates[0] if len(date_candidates) == 1 else None
+    kind, type_candidates = classify_pages(pages)
+    laboratory, pending = laboratory_rows(pages)
     for row in laboratory:
-        row_day=document_date(pages[row['page']-1]) or day
-        row.update(side='',date=row_day,date_source='Дата страницы' if row_day!=day else 'Дата документа',origin='Лабораторный бланк',status='Проверить' if row['page'] in ocr_pages else 'Извлечено')
-    descriptive,sections=narrative(pages,day,ocr_pages)
-    problems=[]
-    if not any(text.strip() for text in pages):problems.append('В документе не обнаружен читаемый текст')
-    for page,line,text in pending:
-        if re.match(r'^(Общий|Исследование мочи методом|Анализ крови биохимический)',text,re.I):continue
-        problems.append(f'Страница {page}, строка {line}: проверить строку таблицы — {text}')
-    page_numbers=extracted.get('page_numbers',list(range(1,len(pages)+1)))
-    for item in laboratory+descriptive+sections:item['page']=page_numbers[item['page']-1]
-    return {'version':PARSER_VERSION,'names':names,'births':births,'cards':cards,'date':day,'page_numbers':page_numbers,
-            'type':study_type('\n'.join(pages),filename),'observations':laboratory+descriptive,'sections':sections,
-            'problems':problems,'identity_from_ocr':names!=native_names or births!=native_births,'pages':pages,'ocr_pages':ocr_pages}
+        local = document_date(pages[row['page'] - 1])
+        row_day = local or day
+        from_ocr = row['page'] in ocr_pages
+        row.update(
+            side='', date=row_day, date_source='Дата страницы' if local and local != day else 'Дата документа',
+            origin='Лабораторный бланк', status='Проверить' if from_ocr else 'Извлечено',
+            from_ocr=from_ocr,
+        )
+    descriptive, sections = narrative(pages, day, ocr_pages)
+    page_numbers = extracted.get('page_numbers', list(range(1, len(pages) + 1)))
+    problems = []
+    if not any(text.strip() for text in pages):
+        problems.append('В документе не обнаружен читаемый текст')
+    table_issues = []
+    for page, line, raw in pending:
+        physical_page = page_numbers[page - 1]
+        table_issues.append({'page': physical_page, 'page_index': page, 'line': line})
+        problems.append(f'Страница {physical_page}, строка {line}: проверить строку таблицы — {raw}')
+    for item in laboratory + descriptive + sections:
+        item['page_index'] = item['page']
+        item['page'] = page_numbers[item['page_index'] - 1]
+    result = {
+        'version': PARSER_VERSION, 'names': names, 'births': births, 'cards': cards, 'date': day,
+        'date_candidates': date_candidates, 'page_numbers': page_numbers, 'type': kind,
+        'type_candidates': type_candidates, 'observations': laboratory + descriptive,
+        'sections': sections, 'problems': problems, 'table_issues': table_issues,
+        'identity_from_ocr': names != native_names or births != native_births,
+        'pages': pages, 'ocr_pages': ocr_pages,
+        'ocr_evidence': extracted.get('ocr_evidence', []),
+        'ocr_alternatives': extracted.get('ocr_alternatives', []),
+        'extraction_issues': extracted.get('extraction_issues', []),
+    }
+    result['quality'] = assess(result, extracted)
+    return result
 
 
 def resolve(analyses, known_patients):
