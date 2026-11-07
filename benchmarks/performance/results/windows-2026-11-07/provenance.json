@@ -1,0 +1,30 @@
+{
+  "product_version": "2.4.0",
+  "product_commit": "f17e5f46f32c9dbaa7aae98fb40e5f6c19c4ed7d",
+  "synthetic_only": true,
+  "text_line_endings": "Normalized to LF; parsed JSON values unchanged",
+  "application_sources_modified": false,
+  "runs": [
+    {
+      "run_id": 42390490455,
+      "source_commit": "050c706b75341acc121fc7c9e4fd787a79f51134",
+      "artifact_id": 13582150190,
+      "artifact_sha256": "2e99b70cb04adf2914c8a552e29de7cc92316b2e4c69b97ce56d0cfd0599f953",
+      "conclusion": "success"
+    },
+    {
+      "run_id": 42391558144,
+      "source_commit": "05b0fba35d9c8be7398e863ced8b073667be7dd5",
+      "artifact_id": 13582021675,
+      "artifact_sha256": "034974bfaebd0503f47cc0c29e4edd8344557e6d3f3bdf28e01997b9c87028a3",
+      "conclusion": "success"
+    }
+  ],
+  "additional_check": {
+    "file": "consent-edge-macos.json",
+    "platform": "macOS 27.0.1 arm64, Python 3.12.14",
+    "synthetic_only": true,
+    "network_requests": 0,
+    "timing_claim": false
+  }
+}

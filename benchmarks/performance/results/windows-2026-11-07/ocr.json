@@ -1,0 +1,573 @@
+{
+  "platform": "Windows-2022Server-10.0.20348-SP0",
+  "python": "3.12.10",
+  "dependencies": {
+    "rapidocr": "3.10.0",
+    "onnxruntime": "1.23.2",
+    "opencv-python-headless": "4.12.0.88",
+    "Pillow": "12.3.0",
+    "pypdfium2": "5.14.0"
+  },
+  "tesseract": "tesseract v5.5.3.20260724",
+  "revision": "050c706b75341acc121fc7c9e4fd787a79f51134",
+  "warm_repeats": 2,
+  "runs": [
+    {
+      "mode": "baseline",
+      "cold": {
+        "seconds": 2.5883250000000544,
+        "stages_seconds": {
+          "rapid": [
+            1.4164102999999386
+          ],
+          "tesseract": [
+            0.3843964000000142
+          ]
+        },
+        "page": "eb66d142618650b43344041c48ad8b631ee425002f153f4ef0b7cb19c39c226b",
+        "extracted": "4e84a56eb01269e9306fdd8d4582291280507c30d889ca276a463ee85047f042",
+        "analysis": "dfe4ff13e982741eb25d0c5785634445d9c43064ada559707b95753fa07c72c0",
+        "pages": 1
+      },
+      "warm": {
+        "clean": [
+          {
+            "seconds": 1.1980935999999929,
+            "stages_seconds": {
+              "rapid": [
+                0.8033639000000221
+              ],
+              "tesseract": [
+                0.3870863999999301
+              ]
+            },
+            "page": "eb66d142618650b43344041c48ad8b631ee425002f153f4ef0b7cb19c39c226b",
+            "extracted": "4e84a56eb01269e9306fdd8d4582291280507c30d889ca276a463ee85047f042",
+            "analysis": "dfe4ff13e982741eb25d0c5785634445d9c43064ada559707b95753fa07c72c0",
+            "pages": 1
+          },
+          {
+            "seconds": 1.188833700000032,
+            "stages_seconds": {
+              "rapid": [
+                0.8018478000000187
+              ],
+              "tesseract": [
+                0.38033370000005107
+              ]
+            },
+            "page": "eb66d142618650b43344041c48ad8b631ee425002f153f4ef0b7cb19c39c226b",
+            "extracted": "4e84a56eb01269e9306fdd8d4582291280507c30d889ca276a463ee85047f042",
+            "analysis": "dfe4ff13e982741eb25d0c5785634445d9c43064ada559707b95753fa07c72c0",
+            "pages": 1
+          }
+        ],
+        "rotation": [
+          {
+            "seconds": 3.2933950000000323,
+            "stages_seconds": {
+              "rapid": [
+                2.711018299999978
+              ],
+              "tesseract": [
+                0.5732913000000508
+              ]
+            },
+            "page": "5abf59c61d6658577e0a4a859e275fcae2f4e3ec13df9b1781750b5ae06bfb7f",
+            "extracted": "acb73ef154a1f8a05858d4554f1deed2ce5e1939fb6671588243eca139ec83b6",
+            "analysis": "088c40d7f384bcc6852a9645ec7502376a585adea0acfccc87859fa788b83996",
+            "pages": 1
+          },
+          {
+            "seconds": 3.1102478000000247,
+            "stages_seconds": {
+              "rapid": [
+                2.5336568999999827
+              ],
+              "tesseract": [
+                0.5678719999999657
+              ]
+            },
+            "page": "5abf59c61d6658577e0a4a859e275fcae2f4e3ec13df9b1781750b5ae06bfb7f",
+            "extracted": "acb73ef154a1f8a05858d4554f1deed2ce5e1939fb6671588243eca139ec83b6",
+            "analysis": "088c40d7f384bcc6852a9645ec7502376a585adea0acfccc87859fa788b83996",
+            "pages": 1
+          }
+        ],
+        "small_type": [
+          {
+            "seconds": 1.3367637999999715,
+            "stages_seconds": {
+              "rapid": [
+                0.9611355999999205
+              ],
+              "tesseract": [
+                0.36910039999997935
+              ]
+            },
+            "page": "20c45f370a919d18fa7b159cccde0708076f51c48263689ad720b1b86e5cab54",
+            "extracted": "a67a8e65b23489859e5eeeb1766b75474a59859f4f1846d24bb41a50a0304300",
+            "analysis": "fe2d7b0b08b83d84036af5f94ff70767400bd2cbba5b5f664ac0390f7904b1b4",
+            "pages": 1
+          },
+          {
+            "seconds": 1.216617299999939,
+            "stages_seconds": {
+              "rapid": [
+                0.8493270000000166
+              ],
+              "tesseract": [
+                0.3607580999999982
+              ]
+            },
+            "page": "20c45f370a919d18fa7b159cccde0708076f51c48263689ad720b1b86e5cab54",
+            "extracted": "a67a8e65b23489859e5eeeb1766b75474a59859f4f1846d24bb41a50a0304300",
+            "analysis": "fe2d7b0b08b83d84036af5f94ff70767400bd2cbba5b5f664ac0390f7904b1b4",
+            "pages": 1
+          }
+        ],
+        "skew": [
+          {
+            "seconds": 1.533260299999938,
+            "stages_seconds": {
+              "rapid": [
+                1.1198703000000023
+              ],
+              "tesseract": [
+                0.40148229999999785
+              ]
+            },
+            "page": "18fd46c0acedae3af90d2e448d77393e5a28b8e467548ee78b5e09d9619a1287",
+            "extracted": "69ca431a9739faca5c9e724f3aed66a4151564cc251981459487f31dd3774ca8",
+            "analysis": "2fb5c1098648de83c56b7ce73d169e4461e719321e211e8b5e15aec13ce45ba5",
+            "pages": 1
+          },
+          {
+            "seconds": 1.254763099999991,
+            "stages_seconds": {
+              "rapid": [
+                0.8463468999999577
+              ],
+              "tesseract": [
+                0.39702569999997195
+              ]
+            },
+            "page": "18fd46c0acedae3af90d2e448d77393e5a28b8e467548ee78b5e09d9619a1287",
+            "extracted": "69ca431a9739faca5c9e724f3aed66a4151564cc251981459487f31dd3774ca8",
+            "analysis": "2fb5c1098648de83c56b7ce73d169e4461e719321e211e8b5e15aec13ce45ba5",
+            "pages": 1
+          }
+        ],
+        "scan": [
+          {
+            "seconds": 2.2099160999999867,
+            "stages_seconds": {
+              "rapid": [
+                1.4797532999999703
+              ],
+              "tesseract": [
+                0.6443819999999505
+              ]
+            },
+            "page": "89321b38db71eae1d7648a23a3b36fb4cfb552d5130a758fb27527e19d81644d",
+            "extracted": "48a21eb7e8cad7760fc53408da12f1608edefc7c538df5925cd60d038dddf230",
+            "analysis": "260d58af2f7a4fee621debff79922bd9f881339aafb278de0a9586d5f48f5f0d",
+            "pages": 1
+          },
+          {
+            "seconds": 1.8703372999999601,
+            "stages_seconds": {
+              "rapid": [
+                1.183808900000031
+              ],
+              "tesseract": [
+                0.6413789999999153
+              ]
+            },
+            "page": "89321b38db71eae1d7648a23a3b36fb4cfb552d5130a758fb27527e19d81644d",
+            "extracted": "48a21eb7e8cad7760fc53408da12f1608edefc7c538df5925cd60d038dddf230",
+            "analysis": "260d58af2f7a4fee621debff79922bd9f881339aafb278de0a9586d5f48f5f0d",
+            "pages": 1
+          }
+        ]
+      },
+      "cold_self_peak_rss_mib": 302.4,
+      "self_peak_rss_mib": 746.3,
+      "children_reported_peak_rss_mib": null
+    },
+    {
+      "mode": "overlap",
+      "cold": {
+        "seconds": 1.9601810999999998,
+        "stages_seconds": {
+          "tesseract": [
+            0.5298477000000048
+          ],
+          "rapid": [
+            1.3717182999999977
+          ]
+        },
+        "page": "eb66d142618650b43344041c48ad8b631ee425002f153f4ef0b7cb19c39c226b",
+        "extracted": "4e84a56eb01269e9306fdd8d4582291280507c30d889ca276a463ee85047f042",
+        "analysis": "dfe4ff13e982741eb25d0c5785634445d9c43064ada559707b95753fa07c72c0",
+        "pages": 1
+      },
+      "warm": {
+        "clean": [
+          {
+            "seconds": 1.0026477000000114,
+            "stages_seconds": {
+              "tesseract": [
+                0.4659564999999475
+              ],
+              "rapid": [
+                0.9935022000000799
+              ]
+            },
+            "page": "eb66d142618650b43344041c48ad8b631ee425002f153f4ef0b7cb19c39c226b",
+            "extracted": "4e84a56eb01269e9306fdd8d4582291280507c30d889ca276a463ee85047f042",
+            "analysis": "dfe4ff13e982741eb25d0c5785634445d9c43064ada559707b95753fa07c72c0",
+            "pages": 1
+          },
+          {
+            "seconds": 0.8898212999999942,
+            "stages_seconds": {
+              "tesseract": [
+                0.5245180999999093
+              ],
+              "rapid": [
+                0.879976299999953
+              ]
+            },
+            "page": "eb66d142618650b43344041c48ad8b631ee425002f153f4ef0b7cb19c39c226b",
+            "extracted": "4e84a56eb01269e9306fdd8d4582291280507c30d889ca276a463ee85047f042",
+            "analysis": "dfe4ff13e982741eb25d0c5785634445d9c43064ada559707b95753fa07c72c0",
+            "pages": 1
+          }
+        ],
+        "rotation": [
+          {
+            "seconds": 2.9534760000000233,
+            "stages_seconds": {
+              "tesseract": [
+                0.830635099999995
+              ],
+              "rapid": [
+                2.940765199999987
+              ]
+            },
+            "page": "5abf59c61d6658577e0a4a859e275fcae2f4e3ec13df9b1781750b5ae06bfb7f",
+            "extracted": "acb73ef154a1f8a05858d4554f1deed2ce5e1939fb6671588243eca139ec83b6",
+            "analysis": "088c40d7f384bcc6852a9645ec7502376a585adea0acfccc87859fa788b83996",
+            "pages": 1
+          },
+          {
+            "seconds": 2.7870364999999993,
+            "stages_seconds": {
+              "tesseract": [
+                0.7957634000000553
+              ],
+              "rapid": [
+                2.7763737999999876
+              ]
+            },
+            "page": "5abf59c61d6658577e0a4a859e275fcae2f4e3ec13df9b1781750b5ae06bfb7f",
+            "extracted": "acb73ef154a1f8a05858d4554f1deed2ce5e1939fb6671588243eca139ec83b6",
+            "analysis": "088c40d7f384bcc6852a9645ec7502376a585adea0acfccc87859fa788b83996",
+            "pages": 1
+          }
+        ],
+        "small_type": [
+          {
+            "seconds": 1.091297999999938,
+            "stages_seconds": {
+              "tesseract": [
+                0.5027536999999711
+              ],
+              "rapid": [
+                1.082902699999977
+              ]
+            },
+            "page": "20c45f370a919d18fa7b159cccde0708076f51c48263689ad720b1b86e5cab54",
+            "extracted": "a67a8e65b23489859e5eeeb1766b75474a59859f4f1846d24bb41a50a0304300",
+            "analysis": "fe2d7b0b08b83d84036af5f94ff70767400bd2cbba5b5f664ac0390f7904b1b4",
+            "pages": 1
+          },
+          {
+            "seconds": 0.9090600999999197,
+            "stages_seconds": {
+              "tesseract": [
+                0.45054719999995996
+              ],
+              "rapid": [
+                0.9001098999999613
+              ]
+            },
+            "page": "20c45f370a919d18fa7b159cccde0708076f51c48263689ad720b1b86e5cab54",
+            "extracted": "a67a8e65b23489859e5eeeb1766b75474a59859f4f1846d24bb41a50a0304300",
+            "analysis": "fe2d7b0b08b83d84036af5f94ff70767400bd2cbba5b5f664ac0390f7904b1b4",
+            "pages": 1
+          }
+        ],
+        "skew": [
+          {
+            "seconds": 1.2227814999999964,
+            "stages_seconds": {
+              "tesseract": [
+                0.537027299999977
+              ],
+              "rapid": [
+                1.2092231999999967
+              ]
+            },
+            "page": "18fd46c0acedae3af90d2e448d77393e5a28b8e467548ee78b5e09d9619a1287",
+            "extracted": "69ca431a9739faca5c9e724f3aed66a4151564cc251981459487f31dd3774ca8",
+            "analysis": "2fb5c1098648de83c56b7ce73d169e4461e719321e211e8b5e15aec13ce45ba5",
+            "pages": 1
+          },
+          {
+            "seconds": 1.0799458999999842,
+            "stages_seconds": {
+              "tesseract": [
+                0.4846637999999075
+              ],
+              "rapid": [
+                1.0674182999999857
+              ]
+            },
+            "page": "18fd46c0acedae3af90d2e448d77393e5a28b8e467548ee78b5e09d9619a1287",
+            "extracted": "69ca431a9739faca5c9e724f3aed66a4151564cc251981459487f31dd3774ca8",
+            "analysis": "2fb5c1098648de83c56b7ce73d169e4461e719321e211e8b5e15aec13ce45ba5",
+            "pages": 1
+          }
+        ],
+        "scan": [
+          {
+            "seconds": 1.6285213999999542,
+            "stages_seconds": {
+              "tesseract": [
+                0.9046954000000369
+              ],
+              "rapid": [
+                1.5432568999999603
+              ]
+            },
+            "page": "89321b38db71eae1d7648a23a3b36fb4cfb552d5130a758fb27527e19d81644d",
+            "extracted": "48a21eb7e8cad7760fc53408da12f1608edefc7c538df5925cd60d038dddf230",
+            "analysis": "260d58af2f7a4fee621debff79922bd9f881339aafb278de0a9586d5f48f5f0d",
+            "pages": 1
+          },
+          {
+            "seconds": 1.3133090999999695,
+            "stages_seconds": {
+              "tesseract": [
+                0.8018343999999615
+              ],
+              "rapid": [
+                1.2692758000000595
+              ]
+            },
+            "page": "89321b38db71eae1d7648a23a3b36fb4cfb552d5130a758fb27527e19d81644d",
+            "extracted": "48a21eb7e8cad7760fc53408da12f1608edefc7c538df5925cd60d038dddf230",
+            "analysis": "260d58af2f7a4fee621debff79922bd9f881339aafb278de0a9586d5f48f5f0d",
+            "pages": 1
+          }
+        ]
+      },
+      "cold_self_peak_rss_mib": 310.5,
+      "self_peak_rss_mib": 760.8,
+      "children_reported_peak_rss_mib": null
+    },
+    {
+      "mode": "overlap_pipe",
+      "cold": {
+        "seconds": 1.960231799999974,
+        "stages_seconds": {
+          "tesseract": [
+            0.4772027999999864
+          ],
+          "rapid": [
+            1.373629400000027
+          ]
+        },
+        "page": "eb66d142618650b43344041c48ad8b631ee425002f153f4ef0b7cb19c39c226b",
+        "extracted": "4e84a56eb01269e9306fdd8d4582291280507c30d889ca276a463ee85047f042",
+        "analysis": "dfe4ff13e982741eb25d0c5785634445d9c43064ada559707b95753fa07c72c0",
+        "pages": 1
+      },
+      "warm": {
+        "clean": [
+          {
+            "seconds": 0.8828217999999879,
+            "stages_seconds": {
+              "tesseract": [
+                0.5680176000000756
+              ],
+              "rapid": [
+                0.8743131999999605
+              ]
+            },
+            "page": "eb66d142618650b43344041c48ad8b631ee425002f153f4ef0b7cb19c39c226b",
+            "extracted": "4e84a56eb01269e9306fdd8d4582291280507c30d889ca276a463ee85047f042",
+            "analysis": "dfe4ff13e982741eb25d0c5785634445d9c43064ada559707b95753fa07c72c0",
+            "pages": 1
+          },
+          {
+            "seconds": 0.8992919000000938,
+            "stages_seconds": {
+              "tesseract": [
+                0.48924540000007255
+              ],
+              "rapid": [
+                0.8900082999999768
+              ]
+            },
+            "page": "eb66d142618650b43344041c48ad8b631ee425002f153f4ef0b7cb19c39c226b",
+            "extracted": "4e84a56eb01269e9306fdd8d4582291280507c30d889ca276a463ee85047f042",
+            "analysis": "dfe4ff13e982741eb25d0c5785634445d9c43064ada559707b95753fa07c72c0",
+            "pages": 1
+          }
+        ],
+        "rotation": [
+          {
+            "seconds": 2.9471866999999747,
+            "stages_seconds": {
+              "tesseract": [
+                0.7099016999999321
+              ],
+              "rapid": [
+                2.937914699999965
+              ]
+            },
+            "page": "5abf59c61d6658577e0a4a859e275fcae2f4e3ec13df9b1781750b5ae06bfb7f",
+            "extracted": "acb73ef154a1f8a05858d4554f1deed2ce5e1939fb6671588243eca139ec83b6",
+            "analysis": "088c40d7f384bcc6852a9645ec7502376a585adea0acfccc87859fa788b83996",
+            "pages": 1
+          },
+          {
+            "seconds": 2.6455239999999094,
+            "stages_seconds": {
+              "tesseract": [
+                0.8040235999999368
+              ],
+              "rapid": [
+                2.634865999999988
+              ]
+            },
+            "page": "5abf59c61d6658577e0a4a859e275fcae2f4e3ec13df9b1781750b5ae06bfb7f",
+            "extracted": "acb73ef154a1f8a05858d4554f1deed2ce5e1939fb6671588243eca139ec83b6",
+            "analysis": "088c40d7f384bcc6852a9645ec7502376a585adea0acfccc87859fa788b83996",
+            "pages": 1
+          }
+        ],
+        "small_type": [
+          {
+            "seconds": 1.042942299999936,
+            "stages_seconds": {
+              "tesseract": [
+                0.5265699000000268
+              ],
+              "rapid": [
+                1.035395900000026
+              ]
+            },
+            "page": "20c45f370a919d18fa7b159cccde0708076f51c48263689ad720b1b86e5cab54",
+            "extracted": "a67a8e65b23489859e5eeeb1766b75474a59859f4f1846d24bb41a50a0304300",
+            "analysis": "fe2d7b0b08b83d84036af5f94ff70767400bd2cbba5b5f664ac0390f7904b1b4",
+            "pages": 1
+          },
+          {
+            "seconds": 0.8873512999999775,
+            "stages_seconds": {
+              "tesseract": [
+                0.4696162000000186
+              ],
+              "rapid": [
+                0.8782093999999461
+              ]
+            },
+            "page": "20c45f370a919d18fa7b159cccde0708076f51c48263689ad720b1b86e5cab54",
+            "extracted": "a67a8e65b23489859e5eeeb1766b75474a59859f4f1846d24bb41a50a0304300",
+            "analysis": "fe2d7b0b08b83d84036af5f94ff70767400bd2cbba5b5f664ac0390f7904b1b4",
+            "pages": 1
+          }
+        ],
+        "skew": [
+          {
+            "seconds": 1.2625917999999956,
+            "stages_seconds": {
+              "tesseract": [
+                0.5198859000000766
+              ],
+              "rapid": [
+                1.2490708000000268
+              ]
+            },
+            "page": "18fd46c0acedae3af90d2e448d77393e5a28b8e467548ee78b5e09d9619a1287",
+            "extracted": "69ca431a9739faca5c9e724f3aed66a4151564cc251981459487f31dd3774ca8",
+            "analysis": "2fb5c1098648de83c56b7ce73d169e4461e719321e211e8b5e15aec13ce45ba5",
+            "pages": 1
+          },
+          {
+            "seconds": 1.0569789999999557,
+            "stages_seconds": {
+              "tesseract": [
+                0.4872863000000507
+              ],
+              "rapid": [
+                1.043543199999931
+              ]
+            },
+            "page": "18fd46c0acedae3af90d2e448d77393e5a28b8e467548ee78b5e09d9619a1287",
+            "extracted": "69ca431a9739faca5c9e724f3aed66a4151564cc251981459487f31dd3774ca8",
+            "analysis": "2fb5c1098648de83c56b7ce73d169e4461e719321e211e8b5e15aec13ce45ba5",
+            "pages": 1
+          }
+        ],
+        "scan": [
+          {
+            "seconds": 1.6864493000000493,
+            "stages_seconds": {
+              "tesseract": [
+                0.9168665999999348
+              ],
+              "rapid": [
+                1.5957787999999482
+              ]
+            },
+            "page": "89321b38db71eae1d7648a23a3b36fb4cfb552d5130a758fb27527e19d81644d",
+            "extracted": "48a21eb7e8cad7760fc53408da12f1608edefc7c538df5925cd60d038dddf230",
+            "analysis": "260d58af2f7a4fee621debff79922bd9f881339aafb278de0a9586d5f48f5f0d",
+            "pages": 1
+          },
+          {
+            "seconds": 1.3772910000000138,
+            "stages_seconds": {
+              "tesseract": [
+                0.8199809000000187
+              ],
+              "rapid": [
+                1.3304114000000027
+              ]
+            },
+            "page": "89321b38db71eae1d7648a23a3b36fb4cfb552d5130a758fb27527e19d81644d",
+            "extracted": "48a21eb7e8cad7760fc53408da12f1608edefc7c538df5925cd60d038dddf230",
+            "analysis": "260d58af2f7a4fee621debff79922bd9f881339aafb278de0a9586d5f48f5f0d",
+            "pages": 1
+          }
+        ]
+      },
+      "cold_self_peak_rss_mib": 305.3,
+      "self_peak_rss_mib": 761.9,
+      "children_reported_peak_rss_mib": null
+    }
+  ],
+  "repeated_embedded": {
+    "baseline_seconds": 7.639998999999989,
+    "candidate_seconds": 1.2859779000000344,
+    "embedded_occurrences": 6,
+    "unique_images": 1,
+    "extraction_and_analysis_identical": true
+  },
+  "complete_page_extraction_and_analysis_match": true
+}

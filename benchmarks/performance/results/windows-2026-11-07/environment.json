@@ -1,0 +1,13 @@
+{
+  "source": "050c706b75341acc121fc7c9e4fd787a79f51134",
+  "system": {
+    "TotalPhysicalMemory": 17174360064
+  },
+  "synthetic": true,
+  "cpu": {
+    "Name": "AMD EPYC 7763 64-Core Processor                ",
+    "NumberOfCores": 2,
+    "NumberOfLogicalProcessors": 4
+  },
+  "product": "2.4.0"
+}

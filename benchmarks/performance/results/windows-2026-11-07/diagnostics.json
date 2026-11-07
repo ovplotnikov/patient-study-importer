@@ -1,0 +1,561 @@
+{
+  "platform": "Windows-2022Server-10.0.20348-SP0",
+  "python": "3.12.10",
+  "network_requests": 0,
+  "summary": [
+    {
+      "documents": 100,
+      "enabled_snapshot_and_state_equal": true,
+      "seconds": {
+        "current": {
+          "consent_checks": 0.04584110000001829,
+          "record_counters": 1.8936280000000068,
+          "total": 1.9395355000000052
+        },
+        "aggregate": {
+          "consent_checks": 0.045643000000012535,
+          "record_counters": 0.02027799999999047,
+          "total": 0.065921000000003
+        },
+        "off": {
+          "consent_checks": 0.04605470000001333,
+          "record_counters": 2.4999999936881068e-06,
+          "total": 0.04605730000000108
+        }
+      }
+    },
+    {
+      "documents": 1000,
+      "enabled_snapshot_and_state_equal": true,
+      "seconds": {
+        "current": {
+          "consent_checks": 0.4571512999999925,
+          "record_counters": 18.62175669999999,
+          "total": 19.078907999999984
+        },
+        "aggregate": {
+          "consent_checks": 0.4578288000000157,
+          "record_counters": 0.01992060000000606,
+          "total": 0.4767849000000126
+        },
+        "off": {
+          "consent_checks": 0.45553069999999707,
+          "record_counters": 1.5799999999899228e-05,
+          "total": 0.45554649999999697
+        }
+      }
+    }
+  ],
+  "runs": [
+    {
+      "documents": 100,
+      "variant": "current",
+      "seconds": {
+        "consent_checks": 0.04572229999999422,
+        "record_counters": 1.7841772000000162,
+        "total": 1.8298995000000104
+      },
+      "counts": {
+        "record_calls": 200,
+        "state_reads": 300,
+        "state_writes": 200,
+        "fsync_calls": 200,
+        "atomic_replaces": 200
+      },
+      "state_fsync_calls": 200,
+      "snapshot": {
+        "schema_version": 1,
+        "app_version": "2.4.0",
+        "counters": {
+          "formats": {
+            "pdf": 100
+          },
+          "outcomes": {
+            "saved": 100
+          }
+        }
+      },
+      "state_bytes": 221,
+      "state_sha256": "9bae3889b8addaae77ea4585154c2ea0f556f7e6f1def710e8260285e9e6d26b",
+      "repeat": 1
+    },
+    {
+      "documents": 100,
+      "variant": "aggregate",
+      "seconds": {
+        "consent_checks": 0.045643000000012535,
+        "record_counters": 0.02027799999999047,
+        "total": 0.065921000000003
+      },
+      "counts": {
+        "record_calls": 2,
+        "state_reads": 102,
+        "state_writes": 2,
+        "fsync_calls": 2,
+        "atomic_replaces": 2
+      },
+      "state_fsync_calls": 2,
+      "snapshot": {
+        "schema_version": 1,
+        "app_version": "2.4.0",
+        "counters": {
+          "formats": {
+            "pdf": 100
+          },
+          "outcomes": {
+            "saved": 100
+          }
+        }
+      },
+      "state_bytes": 221,
+      "state_sha256": "9bae3889b8addaae77ea4585154c2ea0f556f7e6f1def710e8260285e9e6d26b",
+      "repeat": 1
+    },
+    {
+      "documents": 100,
+      "variant": "off",
+      "seconds": {
+        "consent_checks": 0.04581910000001699,
+        "record_counters": 2.4999999936881068e-06,
+        "total": 0.045821600000010676
+      },
+      "counts": {
+        "record_calls": 0,
+        "state_reads": 100,
+        "state_writes": 0,
+        "fsync_calls": 0,
+        "atomic_replaces": 0
+      },
+      "state_fsync_calls": 0,
+      "snapshot": null,
+      "state_bytes": 176,
+      "state_sha256": "c9ada1e2e43d07a6e6195048e8141d7f68928609e7313947fb71f17392db6633",
+      "repeat": 1
+    },
+    {
+      "documents": 100,
+      "variant": "aggregate",
+      "seconds": {
+        "consent_checks": 0.045521500000006654,
+        "record_counters": 0.01899470000000747,
+        "total": 0.06451620000001412
+      },
+      "counts": {
+        "record_calls": 2,
+        "state_reads": 102,
+        "state_writes": 2,
+        "fsync_calls": 2,
+        "atomic_replaces": 2
+      },
+      "state_fsync_calls": 2,
+      "snapshot": {
+        "schema_version": 1,
+        "app_version": "2.4.0",
+        "counters": {
+          "formats": {
+            "pdf": 100
+          },
+          "outcomes": {
+            "saved": 100
+          }
+        }
+      },
+      "state_bytes": 221,
+      "state_sha256": "9bae3889b8addaae77ea4585154c2ea0f556f7e6f1def710e8260285e9e6d26b",
+      "repeat": 2
+    },
+    {
+      "documents": 100,
+      "variant": "off",
+      "seconds": {
+        "consent_checks": 0.04605470000001333,
+        "record_counters": 2.599999987751289e-06,
+        "total": 0.04605730000000108
+      },
+      "counts": {
+        "record_calls": 0,
+        "state_reads": 100,
+        "state_writes": 0,
+        "fsync_calls": 0,
+        "atomic_replaces": 0
+      },
+      "state_fsync_calls": 0,
+      "snapshot": null,
+      "state_bytes": 176,
+      "state_sha256": "c9ada1e2e43d07a6e6195048e8141d7f68928609e7313947fb71f17392db6633",
+      "repeat": 2
+    },
+    {
+      "documents": 100,
+      "variant": "current",
+      "seconds": {
+        "consent_checks": 0.045907499999998436,
+        "record_counters": 1.8936280000000068,
+        "total": 1.9395355000000052
+      },
+      "counts": {
+        "record_calls": 200,
+        "state_reads": 300,
+        "state_writes": 200,
+        "fsync_calls": 200,
+        "atomic_replaces": 200
+      },
+      "state_fsync_calls": 200,
+      "snapshot": {
+        "schema_version": 1,
+        "app_version": "2.4.0",
+        "counters": {
+          "formats": {
+            "pdf": 100
+          },
+          "outcomes": {
+            "saved": 100
+          }
+        }
+      },
+      "state_bytes": 221,
+      "state_sha256": "9bae3889b8addaae77ea4585154c2ea0f556f7e6f1def710e8260285e9e6d26b",
+      "repeat": 2
+    },
+    {
+      "documents": 100,
+      "variant": "off",
+      "seconds": {
+        "consent_checks": 0.046153800000013234,
+        "record_counters": 2.099999989013668e-06,
+        "total": 0.04615590000000225
+      },
+      "counts": {
+        "record_calls": 0,
+        "state_reads": 100,
+        "state_writes": 0,
+        "fsync_calls": 0,
+        "atomic_replaces": 0
+      },
+      "state_fsync_calls": 0,
+      "snapshot": null,
+      "state_bytes": 176,
+      "state_sha256": "c9ada1e2e43d07a6e6195048e8141d7f68928609e7313947fb71f17392db6633",
+      "repeat": 3
+    },
+    {
+      "documents": 100,
+      "variant": "current",
+      "seconds": {
+        "consent_checks": 0.04584110000001829,
+        "record_counters": 1.916616399999981,
+        "total": 1.9624574999999993
+      },
+      "counts": {
+        "record_calls": 200,
+        "state_reads": 300,
+        "state_writes": 200,
+        "fsync_calls": 200,
+        "atomic_replaces": 200
+      },
+      "state_fsync_calls": 200,
+      "snapshot": {
+        "schema_version": 1,
+        "app_version": "2.4.0",
+        "counters": {
+          "formats": {
+            "pdf": 100
+          },
+          "outcomes": {
+            "saved": 100
+          }
+        }
+      },
+      "state_bytes": 221,
+      "state_sha256": "9bae3889b8addaae77ea4585154c2ea0f556f7e6f1def710e8260285e9e6d26b",
+      "repeat": 3
+    },
+    {
+      "documents": 100,
+      "variant": "aggregate",
+      "seconds": {
+        "consent_checks": 0.045832099999984166,
+        "record_counters": 0.022262300000022606,
+        "total": 0.06809440000000677
+      },
+      "counts": {
+        "record_calls": 2,
+        "state_reads": 102,
+        "state_writes": 2,
+        "fsync_calls": 2,
+        "atomic_replaces": 2
+      },
+      "state_fsync_calls": 2,
+      "snapshot": {
+        "schema_version": 1,
+        "app_version": "2.4.0",
+        "counters": {
+          "formats": {
+            "pdf": 100
+          },
+          "outcomes": {
+            "saved": 100
+          }
+        }
+      },
+      "state_bytes": 221,
+      "state_sha256": "9bae3889b8addaae77ea4585154c2ea0f556f7e6f1def710e8260285e9e6d26b",
+      "repeat": 3
+    },
+    {
+      "documents": 1000,
+      "variant": "current",
+      "seconds": {
+        "consent_checks": 0.496730800000023,
+        "record_counters": 20.563944599999985,
+        "total": 21.060675400000008
+      },
+      "counts": {
+        "record_calls": 2000,
+        "state_reads": 3000,
+        "state_writes": 2000,
+        "fsync_calls": 2000,
+        "atomic_replaces": 2000
+      },
+      "state_fsync_calls": 2000,
+      "snapshot": {
+        "schema_version": 1,
+        "app_version": "2.4.0",
+        "counters": {
+          "formats": {
+            "pdf": 1000
+          },
+          "outcomes": {
+            "saved": 1000
+          }
+        }
+      },
+      "state_bytes": 223,
+      "state_sha256": "49b6cab7ab5aebe62b62c11a8ceb8ff00ef911b4eed18f48309695fe56e59d31",
+      "repeat": 1
+    },
+    {
+      "documents": 1000,
+      "variant": "aggregate",
+      "seconds": {
+        "consent_checks": 0.4578288000000157,
+        "record_counters": 0.018956099999996923,
+        "total": 0.4767849000000126
+      },
+      "counts": {
+        "record_calls": 2,
+        "state_reads": 1002,
+        "state_writes": 2,
+        "fsync_calls": 2,
+        "atomic_replaces": 2
+      },
+      "state_fsync_calls": 2,
+      "snapshot": {
+        "schema_version": 1,
+        "app_version": "2.4.0",
+        "counters": {
+          "formats": {
+            "pdf": 1000
+          },
+          "outcomes": {
+            "saved": 1000
+          }
+        }
+      },
+      "state_bytes": 223,
+      "state_sha256": "49b6cab7ab5aebe62b62c11a8ceb8ff00ef911b4eed18f48309695fe56e59d31",
+      "repeat": 1
+    },
+    {
+      "documents": 1000,
+      "variant": "off",
+      "seconds": {
+        "consent_checks": 0.45553069999999707,
+        "record_counters": 1.5799999999899228e-05,
+        "total": 0.45554649999999697
+      },
+      "counts": {
+        "record_calls": 0,
+        "state_reads": 1000,
+        "state_writes": 0,
+        "fsync_calls": 0,
+        "atomic_replaces": 0
+      },
+      "state_fsync_calls": 0,
+      "snapshot": null,
+      "state_bytes": 176,
+      "state_sha256": "c9ada1e2e43d07a6e6195048e8141d7f68928609e7313947fb71f17392db6633",
+      "repeat": 1
+    },
+    {
+      "documents": 1000,
+      "variant": "aggregate",
+      "seconds": {
+        "consent_checks": 0.45557260000001065,
+        "record_counters": 0.01992060000000606,
+        "total": 0.4754932000000167
+      },
+      "counts": {
+        "record_calls": 2,
+        "state_reads": 1002,
+        "state_writes": 2,
+        "fsync_calls": 2,
+        "atomic_replaces": 2
+      },
+      "state_fsync_calls": 2,
+      "snapshot": {
+        "schema_version": 1,
+        "app_version": "2.4.0",
+        "counters": {
+          "formats": {
+            "pdf": 1000
+          },
+          "outcomes": {
+            "saved": 1000
+          }
+        }
+      },
+      "state_bytes": 223,
+      "state_sha256": "49b6cab7ab5aebe62b62c11a8ceb8ff00ef911b4eed18f48309695fe56e59d31",
+      "repeat": 2
+    },
+    {
+      "documents": 1000,
+      "variant": "off",
+      "seconds": {
+        "consent_checks": 0.45536880000000224,
+        "record_counters": 1.5599999983351154e-05,
+        "total": 0.4553843999999856
+      },
+      "counts": {
+        "record_calls": 0,
+        "state_reads": 1000,
+        "state_writes": 0,
+        "fsync_calls": 0,
+        "atomic_replaces": 0
+      },
+      "state_fsync_calls": 0,
+      "snapshot": null,
+      "state_bytes": 176,
+      "state_sha256": "c9ada1e2e43d07a6e6195048e8141d7f68928609e7313947fb71f17392db6633",
+      "repeat": 2
+    },
+    {
+      "documents": 1000,
+      "variant": "current",
+      "seconds": {
+        "consent_checks": 0.4571512999999925,
+        "record_counters": 18.62175669999999,
+        "total": 19.078907999999984
+      },
+      "counts": {
+        "record_calls": 2000,
+        "state_reads": 3000,
+        "state_writes": 2000,
+        "fsync_calls": 2000,
+        "atomic_replaces": 2000
+      },
+      "state_fsync_calls": 2000,
+      "snapshot": {
+        "schema_version": 1,
+        "app_version": "2.4.0",
+        "counters": {
+          "formats": {
+            "pdf": 1000
+          },
+          "outcomes": {
+            "saved": 1000
+          }
+        }
+      },
+      "state_bytes": 223,
+      "state_sha256": "49b6cab7ab5aebe62b62c11a8ceb8ff00ef911b4eed18f48309695fe56e59d31",
+      "repeat": 2
+    },
+    {
+      "documents": 1000,
+      "variant": "off",
+      "seconds": {
+        "consent_checks": 0.46301739999998404,
+        "record_counters": 1.5799999999899228e-05,
+        "total": 0.46303319999998394
+      },
+      "counts": {
+        "record_calls": 0,
+        "state_reads": 1000,
+        "state_writes": 0,
+        "fsync_calls": 0,
+        "atomic_replaces": 0
+      },
+      "state_fsync_calls": 0,
+      "snapshot": null,
+      "state_bytes": 176,
+      "state_sha256": "c9ada1e2e43d07a6e6195048e8141d7f68928609e7313947fb71f17392db6633",
+      "repeat": 3
+    },
+    {
+      "documents": 1000,
+      "variant": "current",
+      "seconds": {
+        "consent_checks": 0.45494059999998626,
+        "record_counters": 18.4525041,
+        "total": 18.907444699999985
+      },
+      "counts": {
+        "record_calls": 2000,
+        "state_reads": 3000,
+        "state_writes": 2000,
+        "fsync_calls": 2000,
+        "atomic_replaces": 2000
+      },
+      "state_fsync_calls": 2000,
+      "snapshot": {
+        "schema_version": 1,
+        "app_version": "2.4.0",
+        "counters": {
+          "formats": {
+            "pdf": 1000
+          },
+          "outcomes": {
+            "saved": 1000
+          }
+        }
+      },
+      "state_bytes": 223,
+      "state_sha256": "49b6cab7ab5aebe62b62c11a8ceb8ff00ef911b4eed18f48309695fe56e59d31",
+      "repeat": 3
+    },
+    {
+      "documents": 1000,
+      "variant": "aggregate",
+      "seconds": {
+        "consent_checks": 0.4593982999999753,
+        "record_counters": 0.02107950000001324,
+        "total": 0.4804777999999885
+      },
+      "counts": {
+        "record_calls": 2,
+        "state_reads": 1002,
+        "state_writes": 2,
+        "fsync_calls": 2,
+        "atomic_replaces": 2
+      },
+      "state_fsync_calls": 2,
+      "snapshot": {
+        "schema_version": 1,
+        "app_version": "2.4.0",
+        "counters": {
+          "formats": {
+            "pdf": 1000
+          },
+          "outcomes": {
+            "saved": 1000
+          }
+        }
+      },
+      "state_bytes": 223,
+      "state_sha256": "49b6cab7ab5aebe62b62c11a8ceb8ff00ef911b4eed18f48309695fe56e59d31",
+      "repeat": 3
+    }
+  ]
+}

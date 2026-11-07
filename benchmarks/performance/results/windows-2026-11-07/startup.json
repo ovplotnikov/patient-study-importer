@@ -1,0 +1,147 @@
+{
+  "platform": "Windows-2022Server-10.0.20348-SP0",
+  "python": "3.12.10",
+  "frozen_probe": {
+    "first_process": {
+      "version": "2.4.0",
+      "ready_ms": 5518.072,
+      "exit_ms": 6377.846
+    },
+    "median_ready_ms": 4620.747,
+    "median_exit_ms": 5342.635,
+    "samples": [
+      {
+        "version": "2.4.0",
+        "ready_ms": 5518.072,
+        "exit_ms": 6377.846
+      },
+      {
+        "version": "2.4.0",
+        "ready_ms": 4630.632,
+        "exit_ms": 5314.63
+      },
+      {
+        "version": "2.4.0",
+        "ready_ms": 4563.637,
+        "exit_ms": 5399.78
+      },
+      {
+        "version": "2.4.0",
+        "ready_ms": 4510.573,
+        "exit_ms": 5209.018
+      },
+      {
+        "version": "2.4.0",
+        "ready_ms": 4620.747,
+        "exit_ms": 5342.635
+      }
+    ]
+  },
+  "source_probe": {
+    "first_process": {
+      "version": "2.4.0",
+      "ready_ms": 1262.666,
+      "exit_ms": 1296.74
+    },
+    "median_ready_ms": 377.434,
+    "median_exit_ms": 410.178,
+    "samples": [
+      {
+        "version": "2.4.0",
+        "ready_ms": 1262.666,
+        "exit_ms": 1296.74
+      },
+      {
+        "version": "2.4.0",
+        "ready_ms": 377.434,
+        "exit_ms": 410.178
+      },
+      {
+        "version": "2.4.0",
+        "ready_ms": 374.294,
+        "exit_ms": 408.307
+      },
+      {
+        "version": "2.4.0",
+        "ready_ms": 377.616,
+        "exit_ms": 410.667
+      },
+      {
+        "version": "2.4.0",
+        "ready_ms": 372.082,
+        "exit_ms": 405.51
+      }
+    ]
+  },
+  "archive": {
+    "exe_bytes": 191971642,
+    "binary_and_data_entries": 1604,
+    "binary_and_data_expanded_bytes": 453962588,
+    "duplicate_dll_pairs": 53,
+    "duplicate_root_archive_bytes": 35129216,
+    "duplicate_vendor_archive_bytes": 35129216,
+    "duplicate_expanded_bytes_one_copy": 92493362,
+    "largest_duplicate_dlls": [
+      {
+        "dll": "libicudt78.dll",
+        "root_archive_bytes": 12757350,
+        "vendor_archive_bytes": 12757350,
+        "expanded_bytes": 33120806
+      },
+      {
+        "dll": "libstdc++-6.dll",
+        "root_archive_bytes": 7872361,
+        "vendor_archive_bytes": 7872361,
+        "expanded_bytes": 26390974
+      },
+      {
+        "dll": "libtesseract-5.dll",
+        "root_archive_bytes": 1579903,
+        "vendor_archive_bytes": 1579903,
+        "expanded_bytes": 3501048
+      },
+      {
+        "dll": "libleptonica-6.dll",
+        "root_archive_bytes": 1332945,
+        "vendor_archive_bytes": 1332945,
+        "expanded_bytes": 2850600
+      },
+      {
+        "dll": "libunistring-5.dll",
+        "root_archive_bytes": 831983,
+        "vendor_archive_bytes": 831983,
+        "expanded_bytes": 2251328
+      },
+      {
+        "dll": "libicuuc78.dll",
+        "root_archive_bytes": 875350,
+        "vendor_archive_bytes": 875350,
+        "expanded_bytes": 1999466
+      },
+      {
+        "dll": "libgio-2.0-0.dll",
+        "root_archive_bytes": 768121,
+        "vendor_archive_bytes": 768121,
+        "expanded_bytes": 1915159
+      },
+      {
+        "dll": "libglib-2.0-0.dll",
+        "root_archive_bytes": 651836,
+        "vendor_archive_bytes": 651836,
+        "expanded_bytes": 1566649
+      },
+      {
+        "dll": "libharfbuzz-0.dll",
+        "root_archive_bytes": 685873,
+        "vendor_archive_bytes": 685873,
+        "expanded_bytes": 1541957
+      },
+      {
+        "dll": "libcairo-2.dll",
+        "root_archive_bytes": 608236,
+        "vendor_archive_bytes": 608236,
+        "expanded_bytes": 1247164
+      }
+    ]
+  }
+}

@@ -1,0 +1,315 @@
+{
+  "platform": "Windows-2022Server-10.0.20348-SP0",
+  "python": "3.12.10 (tags/v3.12.10:0cc8128, Apr  8 2025, 12:21:36) [MSC v.1943 64 bit (AMD64)]",
+  "load_average": null,
+  "synthetic": true,
+  "ocr": false,
+  "records": [
+    {
+      "documents_before": 0,
+      "scenario": "fresh_import",
+      "seconds": 0.6165465999999924,
+      "stage_seconds": {
+        "backup": 0.039748599999995804,
+        "add_file": 0.16769870000001674,
+        "resolve_patients": 0.0009379000000251381,
+        "summary": 0.0009798000000103002,
+        "_export_workbook": 0.10334309999998936,
+        "finish_moves": 0.18405680000000757
+      },
+      "stage_calls": {
+        "backup": 2,
+        "add_file": 10,
+        "resolve_patients": 1,
+        "summary": 2,
+        "_export_workbook": 1,
+        "finish_moves": 1
+      },
+      "documents_after": 10,
+      "patients": 1,
+      "duplicates_total": 0,
+      "errors": 0,
+      "peak_rss_bytes": 61845504
+    },
+    {
+      "documents_before": 10,
+      "scenario": "append_one",
+      "seconds": 0.31694989999999734,
+      "stage_seconds": {
+        "backup": 0.09087000000002377,
+        "add_file": 0.012939200000005258,
+        "resolve_patients": 0.001004099999988739,
+        "summary": 0.001046300000012934,
+        "_export_workbook": 0.1159877999999992,
+        "finish_moves": 0.02363049999999589
+      },
+      "stage_calls": {
+        "backup": 2,
+        "add_file": 1,
+        "resolve_patients": 1,
+        "summary": 2,
+        "_export_workbook": 1,
+        "finish_moves": 1
+      },
+      "documents_after": 11,
+      "patients": 1,
+      "duplicates_total": 0,
+      "errors": 0,
+      "peak_rss_bytes": 62836736
+    },
+    {
+      "documents_before": 11,
+      "scenario": "all_duplicates",
+      "seconds": 0.5508815000000027,
+      "stage_seconds": {
+        "backup": 0.06601109999999721,
+        "add_file": 0.004962799999958634,
+        "resolve_patients": 0.000838899999990872,
+        "summary": 0.0011845999999877677,
+        "_export_workbook": 0.13656480000000215,
+        "finish_moves": 0.23699700000000234
+      },
+      "stage_calls": {
+        "backup": 2,
+        "add_file": 10,
+        "resolve_patients": 1,
+        "summary": 2,
+        "_export_workbook": 1,
+        "finish_moves": 1
+      },
+      "documents_after": 11,
+      "patients": 1,
+      "duplicates_total": 10,
+      "errors": 0,
+      "peak_rss_bytes": 63901696
+    },
+    {
+      "documents_before": 11,
+      "scenario": "empty_queue",
+      "seconds": 0.27772630000001186,
+      "stage_seconds": {
+        "backup": 0.13025959999998804,
+        "resolve_patients": 0.0007851999999957116,
+        "summary": 0.001203900000007252,
+        "_export_workbook": 0.13785690000000272,
+        "finish_moves": 7.939999997574887e-05
+      },
+      "stage_calls": {
+        "backup": 2,
+        "resolve_patients": 1,
+        "summary": 2,
+        "_export_workbook": 1,
+        "finish_moves": 1
+      },
+      "documents_after": 11,
+      "patients": 1,
+      "duplicates_total": 10,
+      "errors": 0,
+      "peak_rss_bytes": 64135168
+    },
+    {
+      "documents_before": 0,
+      "scenario": "fresh_import",
+      "seconds": 4.234138700000017,
+      "stage_seconds": {
+        "backup": 0.05416119999998159,
+        "add_file": 1.0928477999999302,
+        "resolve_patients": 0.006452300000006517,
+        "summary": 0.006266000000010763,
+        "_export_workbook": 0.4107791000000134,
+        "finish_moves": 1.8749506999999994
+      },
+      "stage_calls": {
+        "backup": 2,
+        "add_file": 100,
+        "resolve_patients": 1,
+        "summary": 2,
+        "_export_workbook": 1,
+        "finish_moves": 1
+      },
+      "documents_after": 100,
+      "patients": 1,
+      "duplicates_total": 0,
+      "errors": 0,
+      "peak_rss_bytes": 69615616
+    },
+    {
+      "documents_before": 100,
+      "scenario": "append_one",
+      "seconds": 0.6986894000000063,
+      "stage_seconds": {
+        "backup": 0.08679619999998067,
+        "add_file": 0.009837299999986726,
+        "resolve_patients": 0.006055500000002212,
+        "summary": 0.0289265000000114,
+        "_export_workbook": 0.5141602000000205,
+        "finish_moves": 0.020039300000007643
+      },
+      "stage_calls": {
+        "backup": 2,
+        "add_file": 1,
+        "resolve_patients": 1,
+        "summary": 2,
+        "_export_workbook": 1,
+        "finish_moves": 1
+      },
+      "documents_after": 101,
+      "patients": 1,
+      "duplicates_total": 0,
+      "errors": 0,
+      "peak_rss_bytes": 74731520
+    },
+    {
+      "documents_before": 101,
+      "scenario": "all_duplicates",
+      "seconds": 3.268292599999995,
+      "stage_seconds": {
+        "backup": 0.0993530000000078,
+        "add_file": 0.05252569999993284,
+        "resolve_patients": 0.007239499999997179,
+        "summary": 0.007050899999995863,
+        "_export_workbook": 0.5955866999999841,
+        "finish_moves": 1.9201017999999976
+      },
+      "stage_calls": {
+        "backup": 2,
+        "add_file": 100,
+        "resolve_patients": 1,
+        "summary": 2,
+        "_export_workbook": 1,
+        "finish_moves": 1
+      },
+      "documents_after": 101,
+      "patients": 1,
+      "duplicates_total": 100,
+      "errors": 0,
+      "peak_rss_bytes": 80969728
+    },
+    {
+      "documents_before": 101,
+      "scenario": "empty_queue",
+      "seconds": 0.7665767000000017,
+      "stage_seconds": {
+        "backup": 0.09604180000002316,
+        "resolve_patients": 0.03519670000000019,
+        "summary": 0.006316300000008823,
+        "_export_workbook": 0.6239221999999813,
+        "finish_moves": 0.00016199999998889325
+      },
+      "stage_calls": {
+        "backup": 2,
+        "resolve_patients": 1,
+        "summary": 2,
+        "_export_workbook": 1,
+        "finish_moves": 1
+      },
+      "documents_after": 101,
+      "patients": 1,
+      "duplicates_total": 100,
+      "errors": 0,
+      "peak_rss_bytes": 80969728
+    },
+    {
+      "documents_before": 0,
+      "scenario": "fresh_import",
+      "seconds": 20.51355939999999,
+      "stage_seconds": {
+        "backup": 0.1160408000000075,
+        "add_file": 5.00156390000015,
+        "resolve_patients": 0.04849849999999378,
+        "summary": 0.03606799999994337,
+        "_export_workbook": 2.1496578,
+        "finish_moves": 9.286032999999975
+      },
+      "stage_calls": {
+        "backup": 2,
+        "add_file": 500,
+        "resolve_patients": 1,
+        "summary": 2,
+        "_export_workbook": 1,
+        "finish_moves": 1
+      },
+      "documents_after": 500,
+      "patients": 1,
+      "duplicates_total": 0,
+      "errors": 0,
+      "peak_rss_bytes": 90042368
+    },
+    {
+      "documents_before": 500,
+      "scenario": "append_one",
+      "seconds": 3.042489699999976,
+      "stage_seconds": {
+        "backup": 0.1687397999999689,
+        "add_file": 0.02363189999999804,
+        "resolve_patients": 0.0471196999999961,
+        "summary": 0.03488670000001548,
+        "_export_workbook": 2.717548000000022,
+        "finish_moves": 0.0193391000000247
+      },
+      "stage_calls": {
+        "backup": 2,
+        "add_file": 1,
+        "resolve_patients": 1,
+        "summary": 2,
+        "_export_workbook": 1,
+        "finish_moves": 1
+      },
+      "documents_after": 501,
+      "patients": 1,
+      "duplicates_total": 0,
+      "errors": 0,
+      "peak_rss_bytes": 117407744
+    },
+    {
+      "documents_before": 501,
+      "scenario": "all_duplicates",
+      "seconds": 16.61735550000003,
+      "stage_seconds": {
+        "backup": 0.16691339999999855,
+        "add_file": 0.2706323000005568,
+        "resolve_patients": 0.06444310000000542,
+        "summary": 0.03812909999999192,
+        "_export_workbook": 3.4985813999999777,
+        "finish_moves": 9.686306000000002
+      },
+      "stage_calls": {
+        "backup": 2,
+        "add_file": 500,
+        "resolve_patients": 1,
+        "summary": 2,
+        "_export_workbook": 1,
+        "finish_moves": 1
+      },
+      "documents_after": 501,
+      "patients": 1,
+      "duplicates_total": 500,
+      "errors": 0,
+      "peak_rss_bytes": 120283136
+    },
+    {
+      "documents_before": 501,
+      "scenario": "empty_queue",
+      "seconds": 3.917829100000006,
+      "stage_seconds": {
+        "backup": 0.16306729999996605,
+        "resolve_patients": 0.0643324999999777,
+        "summary": 0.03682770000000346,
+        "_export_workbook": 3.6581444999999917,
+        "finish_moves": 0.0002607000000125481
+      },
+      "stage_calls": {
+        "backup": 2,
+        "resolve_patients": 1,
+        "summary": 2,
+        "_export_workbook": 1,
+        "finish_moves": 1
+      },
+      "documents_after": 501,
+      "patients": 1,
+      "duplicates_total": 500,
+      "errors": 0,
+      "peak_rss_bytes": 121090048
+    }
+  ]
+}
