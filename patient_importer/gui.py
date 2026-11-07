@@ -127,7 +127,7 @@ class Application:
         if selected:self.select(selected)
 
     def row(self,name,subtitle,icon=None,action=None,action_text=None):
-        row=ttk.Frame(self.content.body,padding=(4,14));row.pack(fill='x')
+        row=ttk.Frame(self.content.body,padding=(4,8));row.pack(fill='x')
         ttk.Label(row,image=icon or self.icons.file(name)).pack(side='left',padx=(4,18))
         if action:
             button=ttk.Button(row,command=action,style='Link.TButton',**({'text':action_text} if action_text else {'image':self.icons.get('x-lg','muted',20)}))
