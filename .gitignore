@@ -37,3 +37,8 @@ local-*
 Дубли/
 Ошибки/
 Резервные копии/
+
+# Reviewed UI library assets only; clinical images remain ignored.
+!patient_importer/assets/icons/*.png
+Отложено/
+patient_importer/assets/help/

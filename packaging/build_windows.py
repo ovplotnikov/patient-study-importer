@@ -21,14 +21,18 @@ for language in ['rus','eng']:
         (target/'tessdata'/f'{language}.traineddata').write_bytes(response.read())
 subprocess.run([sys.executable,'-m','PyInstaller','--noconfirm','--clean','--onefile','--windowed',
                 '--name','Исследования пациентов','--add-data',str(root/'vendor')+';vendor',
-                '--collect-all','pypdfium2','--collect-all','pypdfium2_raw',str(root/'app.py')],cwd=root,check=True)
-(root/'dist'/'Инструкция.txt').write_text((root/'docs'/'USER_GUIDE.md').read_text(encoding='utf-8'),encoding='utf-8-sig')
+                '--add-data',str(root/'patient_importer'/'assets')+';patient_importer/assets',
+                '--collect-all','tkinterdnd2','--collect-all','pypdfium2','--collect-all','pypdfium2_raw',str(root/'app.py')],cwd=root,check=True)
+(root/'dist'/'Инструкция.txt').write_text('Откройте docs/Краткая инструкция.pdf или docs/guide.html.\nВ программе кнопка «Помощь» всегда открывает инструкцию текущей версии.\n',encoding='utf-8-sig')
 docs_target=root/'dist'/'docs';docs_target.mkdir(exist_ok=True)
+for name in ['Краткая инструкция.pdf','guide.html']:
+    shutil.copy2(root/'build'/'guide'/name,docs_target/name)
 for name in ['USER_GUIDE.md','CODEX_INSTALL.md','SUPPORTED_FORMS.md','PRIVACY.md']:
     shutil.copy2(root/'docs'/name,docs_target/name)
 license_root=root/'dist'/'Лицензии';license_root.mkdir(exist_ok=True)
 shutil.copy2(root/'LICENSE',license_root/'PatientStudyImporter-MIT.txt')
-packages=['pypdf','openpyxl','python-docx','Pillow','pypdfium2','portalocker','lxml','et-xmlfile','typing_extensions']
+shutil.copy2(root/'patient_importer'/'assets'/'icons'/'LICENSE.txt',license_root/'Bootstrap-Icons-MIT.txt')
+packages=['pypdf','openpyxl','python-docx','Pillow','pypdfium2','portalocker','lxml','et-xmlfile','typing_extensions','tkinterdnd2']
 versions={}
 for package in packages:
     try:distribution=importlib.metadata.distribution(package)

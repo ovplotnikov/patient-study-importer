@@ -1,0 +1,2 @@
+Bootstrap Icons v1.13.1 — https://github.com/twbs/icons/tree/v1.13.1/icons
+MIT; SVGs rendered at 64px in palette variants.
