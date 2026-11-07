@@ -1,8 +1,12 @@
 """Package only distributable files, retaining Russian names inside the ZIP."""
 import hashlib
+import json
 from pathlib import Path
 import sys
 from zipfile import ZIP_DEFLATED, ZipFile
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from patient_importer import __version__
+from patient_importer.updater import DATA_FORMAT
 
 root = Path(sys.argv[1] if len(sys.argv) > 1 else 'dist')
 files = [root / name for name in (
@@ -12,6 +16,10 @@ licenses = root / 'Лицензии'
 if not licenses.is_dir() or any(not path.is_file() for path in files):
     raise SystemExit('Missing release files or license directory')
 files += sorted(path for path in licenses.rglob('*') if path.is_file())
+manifest = root / 'update.json'
+manifest.write_text(json.dumps({'format': 1, 'version': __version__, 'data_format': DATA_FORMAT,
+    'exe_sha256': hashlib.sha256((root / 'Исследования пациентов.exe').read_bytes()).hexdigest()}, indent=2), encoding='utf8')
+files.append(manifest)
 for name in ('USER_GUIDE.md','CODEX_INSTALL.md','SUPPORTED_FORMS.md','PRIVACY.md'):
     path = root / 'docs' / name
     if not path.is_file():

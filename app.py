@@ -10,8 +10,30 @@ def main():
     parser.add_argument('--import-folder',type=Path)
     parser.add_argument('--self-test',type=Path)
     parser.add_argument('--ui-smoke-test',type=Path)
+    parser.add_argument('--apply-update',type=Path)
+    parser.add_argument('--update-probe',type=Path)
+    parser.add_argument('--update-lock-probe',type=Path)
     args=parser.parse_args()
+    if args.apply_update:
+        from patient_importer.updater import run_helper
+        run_helper(args.apply_update)
+        return
+    if args.update_probe:
+        from patient_importer import __version__
+        from patient_importer.gui import Application
+        import tkinter as tk
+        window=tk.Tk();window.withdraw();window.update_idletasks();window.destroy()
+        args.update_probe.write_text(json.dumps({'version':__version__}),encoding='utf8')
+        return
+    if args.update_lock_probe:
+        import time
+        args.update_lock_probe.mkdir(parents=True,exist_ok=True)
+        (args.update_lock_probe/'ready').write_text('ready')
+        deadline=time.monotonic()+90
+        while not (args.update_lock_probe/'exit').exists() and time.monotonic()<deadline:time.sleep(.1)
+        return
     if args.ui_smoke_test:
+        os.environ['PATIENT_IMPORTER_NO_UPDATE_CHECK']='1'
         args.ui_smoke_test.mkdir(parents=True,exist_ok=True)
         from tkinter import messagebox
         def fail_dialog(title,message,**kwargs):raise RuntimeError(title+': '+message)
@@ -62,8 +84,19 @@ def main():
         review.name.set('ТЕСТОВ ТЕСТ ТЕСТОВИЧ');review.birth.set('01.01.2000');review.confirm_button.invoke();application.root.update()
         assert application.workspace.summary()['review']==0
         review.window.destroy()
+        from unittest.mock import patch
+        from patient_importer import updater
+        offered=[]
+        future=updater.Release('v99.0.0','','',1)
+        with patch.object(updater,'check_for_update',return_value=future), patch.object(updater,'cleanup_cache'), patch.object(messagebox,'askyesno',side_effect=lambda *a,**k:offered.append(True) or False):
+            application.auto_update_check()
+            deadline=time.monotonic()+10
+            while not offered:
+                application.root.update();time.sleep(.05)
+                assert time.monotonic()<deadline,'Automatic update offer did not appear'
+        assert not application.updating and application.pending_update is None
         application.root.destroy()
-        (args.ui_smoke_test/'ui-test.json').write_text(json.dumps({'ok':True,'checks':['window_creation','folder_selection','process_button','background_import','completion_state','review_window','confirmation_button','buttons_fully_visible']}),encoding='utf-8')
+        (args.ui_smoke_test/'ui-test.json').write_text(json.dumps({'ok':True,'checks':['window_creation','folder_selection','process_button','background_import','completion_state','review_window','confirmation_button','buttons_fully_visible','automatic_update_offer_and_decline']}),encoding='utf-8')
         return
     if args.self_test:
         from patient_importer.smoke import smoke_test
@@ -81,6 +114,8 @@ def main():
 if __name__=='__main__':
     try:main()
     except Exception as exc:
+        if any(flag in sys.argv for flag in ['--apply-update','--update-probe','--update-lock-probe']):
+            raise SystemExit(1)
         if len(sys.argv)>1:
             if getattr(sys,'frozen',False):
                 import traceback

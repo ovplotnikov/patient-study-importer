@@ -13,6 +13,7 @@ from tkinter import font as tkfont
 import traceback
 
 from .storage import Workspace
+from . import __version__, updater
 
 
 def open_path(path):
@@ -27,6 +28,7 @@ class Application:
         tkfont.nametofont('TkDefaultFont').configure(family='Segoe UI' if os.name=='nt' else 'Helvetica',size=11)
         style=ttk.Style();style.configure('Title.TLabel',font=('Segoe UI',22,'bold'));style.configure('Action.TButton',padding=(20,13));style.configure('TButton',padding=(10,7))
         self.events=queue.Queue();self.worker=None;self.cancel=threading.Event();self.closing=False
+        self.updating=False;self.update_cancel=threading.Event();self.pending_update=None
         self.settings=Path(os.environ.get('APPDATA',str(Path.home()/'.config')))/'PatientStudyImporter'/'settings.json'
         self.workspace=None
         frame=ttk.Frame(self.root,padding=20);frame.pack(fill='both',expand=True)
@@ -56,7 +58,7 @@ class Application:
         ttk.Label(frame,text=help_text,wraplength=870,justify='left').pack(anchor='w')
         bottom=ttk.Frame(frame);bottom.pack(side='bottom',fill='x',pady=(15,0))
         ttk.Button(bottom,text='Сведения и журнал',command=self.details).pack(side='left')
-        ttk.Label(bottom,text='Локальная обработка · версия 2.0',foreground='#65727c').pack(side='right')
+        ttk.Label(bottom,text=f'Локальная обработка · версия {__version__}',foreground='#65727c').pack(side='right')
         default=Path.home()/'Documents'/'Исследования пациентов'
         portable=Path(sys.executable).parent/'Данные'
         if getattr(sys,'frozen',False) and portable.is_dir():default=portable
@@ -68,6 +70,48 @@ class Application:
         self.select(default)
         self.root.protocol('WM_DELETE_WINDOW',self.close)
         self.root.after(100,self.poll)
+        if not os.environ.get('PATIENT_IMPORTER_NO_UPDATE_CHECK'):
+            self.root.after(2000,self.auto_update_check)
+
+    def auto_update_check(self):
+        if os.name!='nt' or not getattr(sys,'frozen',False):return
+        def check():
+            try:
+                updater.cleanup_cache()
+                release=updater.check_for_update()
+                if release:self.events.put(('update_available',release))
+            except Exception:
+                pass  # Offline/rate-limited startup must not interrupt clinical work.
+        threading.Thread(target=check,daemon=True).start()
+
+    def offer_update(self):
+        if self.closing or not self.pending_update:return
+        review=getattr(self,'review_window',None)
+        if (self.worker and self.worker.is_alive()) or self.updating or (review and review.window.winfo_exists()):
+            self.root.after(2000,self.offer_update);return
+        release=self.pending_update;self.pending_update=None
+        if not messagebox.askyesno('Доступно обновление',
+                f'Доступна версия {release.tag.lstrip("v")} (установлена {__version__}).\n\n'
+                'Скачать, установить и перезапустить программу сейчас?\n'
+                'Исследования, таблица и выбранная рабочая папка сохранятся.',parent=self.root):return
+        self.updating=True;self.update_cancel.clear();self.busy(True)
+        self.stop_button.config(text='Отменить обновление')
+        self.current.set('')
+        self.phase.set('Скачиваем обновление…');self.progress['maximum']=100;self.progress['value']=0
+        def download():
+            try:
+                stage=updater.prepare_update(release,self.update_cancel,
+                    lambda value:self.events.put(('update_progress',value)))
+                self.events.put(('update_ready',stage))
+            except Exception as exc:
+                message=str(exc) if isinstance(exc,updater.UpdateError) else 'Не удалось скачать обновление. Текущая программа и данные сохранены.'
+                self.events.put(('update_error',message))
+        threading.Thread(target=download,daemon=False).start()
+
+    def finish_update_attempt(self,message):
+        self.updating=False;self.busy(False);self.stop_button.config(text='Остановить')
+        self.current.set('');self.phase.set(message)
+        if self.closing:self.root.destroy()
 
     def select(self,path):
         try:
@@ -106,13 +150,36 @@ class Application:
         self.worker=threading.Thread(target=work,daemon=False);self.worker.start()
 
     def stop(self):
+        if self.updating:
+            self.update_cancel.set();self.phase.set('Отменяем загрузку обновления…');return
         self.cancel.set();self.phase.set('Остановимся после текущего файла и сохраним результат.');self.stop_button.config(state='disabled')
 
     def poll(self):
         try:
             while True:
                 kind,data=self.events.get_nowait()
-                if kind=='progress':
+                if kind=='update_available':
+                    self.pending_update=data;self.root.after(0,self.offer_update)
+                elif kind=='update_progress':
+                    self.progress['value']=data;self.phase.set(f'Скачиваем обновление — {data}%')
+                elif kind=='update_error':
+                    cancelled=self.update_cancel.is_set()
+                    self.finish_update_attempt('Обновление отменено.' if cancelled else data)
+                    if self.closing:return
+                    if not cancelled:messagebox.showerror('Обновление не установлено',data,parent=self.root)
+                elif kind=='update_ready':
+                    if self.update_cancel.is_set():
+                        import shutil
+                        shutil.rmtree(data,ignore_errors=True)
+                        self.finish_update_attempt('Обновление отменено.')
+                        if self.closing:return
+                    else:
+                        try:updater.launch_install(data,sys.executable)
+                        except Exception:
+                            self.finish_update_attempt('Не удалось начать установку. Программа и данные сохранены.')
+                            messagebox.showerror('Обновление не установлено','Проверьте доступ на запись к папке программы. Текущая версия продолжит работать.',parent=self.root)
+                        else:self.root.destroy();return
+                elif kind=='progress':
                     if 'phase' in data:self.phase.set(data['phase'])
                     if 'current' in data:self.current.set(data['current'])
                     if 'total' in data:self.progress['maximum']=max(1,data['total'])
@@ -148,6 +215,10 @@ class Application:
         self.review_window=ReviewWindow(self.root,self.workspace,self.refresh)
 
     def close(self):
+        if self.updating:
+            if messagebox.askyesno('Скачивается обновление','Отменить загрузку и закрыть программу?',parent=self.root):
+                self.closing=True;self.update_cancel.set()
+            return
         if self.worker and self.worker.is_alive():
             if messagebox.askyesno('Идёт обработка','Остановить после текущего файла, сохранить результат и закрыть программу?',parent=self.root):
                 self.closing=True;self.stop()

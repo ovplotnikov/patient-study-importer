@@ -51,6 +51,8 @@ jobs:
           if (Test-Path (Join-Path $testRoot 'ui.png')) { Copy-Item (Join-Path $testRoot 'ui.png') dist/ui.png }
           if (Test-Path (Join-Path $testRoot 'review-ui.png')) { Copy-Item (Join-Path $testRoot 'review-ui.png') dist/review-ui.png }
           Get-FileHash $exe.FullName -Algorithm SHA256 | Format-List | Out-File dist/SHA256.txt
+      - name: Test frozen automatic updater and data preservation
+        run: python packaging/test_windows_update.py
       - uses: actions/upload-artifact@v4
         with:
           name: patient-study-importer-windows
