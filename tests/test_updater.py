@@ -67,8 +67,13 @@ class UpdaterTests(unittest.TestCase):
         self.assertTrue(u.trusted_url('https://release-assets.githubusercontent.com/a'))
 
     def test_archive_rejects_paths_and_unknown_payloads(self):
-        for name in ['../outside.exe', '/absolute.exe', 'docs/../../bad', 'docs\\bad', 'Данные/registry.sqlite']:
-            with self.assertRaises(u.UpdateError):u.validate_archive(self.archive((name, 'bad')), self.stage, 'v2.2.0')
+        for name in ['../outside.exe', '/absolute.exe', 'docs/../../bad', 'Данные/registry.sqlite']:
+            with self.subTest(name=name), self.assertRaises(u.UpdateError):
+                u.validate_archive(self.archive((name, 'bad')), self.stage, 'v2.2.0')
+        # ZipInfo normalizes backslashes when writing on Windows: craft the raw filename.
+        archive=self.archive(('docs/bad','bad'))
+        archive.write_bytes(archive.read_bytes().replace(b'docs/bad',b'docs\\bad'))
+        with self.assertRaises(u.UpdateError):u.validate_archive(archive,self.stage,'v2.2.0')
         self.assertFalse((self.root / 'outside.exe').exists())
 
     def test_archive_rejects_symlinks_and_duplicates(self):

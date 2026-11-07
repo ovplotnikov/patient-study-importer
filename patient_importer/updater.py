@@ -141,7 +141,7 @@ def validate_archive(archive, stage, tag):
             name = item.filename
             parts = PurePosixPath(name).parts
             key = name.rstrip('/').casefold()
-            if (not parts or name.startswith('/') or '\\' in name or ':' in name or '..' in parts
+            if (not parts or name.startswith('/') or '\\' in item.orig_filename or '\x00' in item.orig_filename or ':' in name or '..' in parts
                     or key in seen or stat.S_ISLNK(item.external_attr >> 16)):
                 raise UpdateError('Небезопасная структура архива обновления.')
             seen.add(key)
