@@ -36,7 +36,7 @@ class Application:
         self.root.geometry(f'{min(1100,self.root.winfo_screenwidth()-50)}x{min(800,self.root.winfo_screenheight()-130)}+20+20')
         self.root.minsize(850,620);ui.setup(self.root);self.icons=ui.Icons(self.root)
         self.events=queue.Queue();self.worker=None;self.cancel=threading.Event();self.closing=False
-        self.updating=False;self.update_cancel=threading.Event();self.pending_update=None
+        self.updating=False;self.update_cancel=threading.Event();self.pending_update=None;self.update_prompt_active=False
         self.working=False;self.screen='documents';self.batch=[];self.paths=[]
         self.workspace=None;self.review_window=None;self.problem_window=None;self.history_window=None
         self.settings=Path(os.environ.get('APPDATA',str(Path.home()/'.config')))/'PatientStudyImporter'/'settings.json'
@@ -350,7 +350,9 @@ class Application:
 
     def offer_diagnostics(self):
         if self.closing or not self.diagnostics.should_prompt():return
-        if self.working or self.updating or self.root.grab_current():
+        # Native/Tcl dialogs do not always have a Python Widget wrapper.
+        if (self.working or self.updating or self.update_prompt_active
+                or self.root.tk.call('grab','current')):
             self.root.after(3000,self.offer_diagnostics);return
         if self.diagnostics.mark_prompted():self.show_diagnostics(first_run=True)
 
@@ -374,7 +376,11 @@ class Application:
         if (self.worker and self.worker.is_alive()) or self.updating or any(w and w.window.winfo_exists() for w in windows):
             self.root.after(2000,self.offer_update);return
         release=self.pending_update;self.pending_update=None
-        if not messagebox.askyesno('Доступно обновление',f'Доступна версия {release.tag.lstrip("v")} (установлена {__version__}).\n\nСкачать, установить и перезапустить программу сейчас?\nИсследования, таблица и выбранная рабочая папка сохранятся.',parent=self.root):return
+        self.update_prompt_active=True
+        try:
+            accepted=messagebox.askyesno('Доступно обновление',f'Доступна версия {release.tag.lstrip("v")} (установлена {__version__}).\n\nСкачать, установить и перезапустить программу сейчас?\nИсследования, таблица и выбранная рабочая папка сохранятся.',parent=self.root)
+        finally:self.update_prompt_active=False
+        if not accepted:return
         self.updating=True;self.update_cancel.clear();self.busy(True)
         self.start_button.pack_forget();self.review_button.pack_forget();self.new_button.pack_forget()
         self.stop_button.config(text='Отменить обновление');self.stop_button.pack(side='right')
