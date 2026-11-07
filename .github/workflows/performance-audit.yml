@@ -2,6 +2,14 @@ name: Synthetic performance audit (no release)
 on:
   push:
     branches: [codex/performance-audit]
+    paths:
+      - benchmarks/performance/analysis.py
+      - benchmarks/performance/e2e.py
+      - benchmarks/performance/ocr.py
+      - benchmarks/performance/startup.py
+      - benchmarks/performance/storage.py
+      - benchmarks/performance/tk_queue.py
+      - benchmarks/performance/ui_reads.py
   workflow_dispatch:
 permissions:
   contents: read
