@@ -16,7 +16,7 @@ import portalocker
 
 from . import analysis, extraction
 
-MANAGED={'Обработано','Нужно уточнить','Дубли','Ошибки','База','Резервные копии'}
+MANAGED={'Обработано','Нужно уточнить','Дубли','Ошибки','База','Резервные копии','Отложено'}
 
 
 def sha256(path):
@@ -230,7 +230,7 @@ class Workspace:
         cancel=cancel or threading.Event()
         with self.lock(),self.connect() as db:
             self.backup(db)
-            paths,skipped=self.files();progress(total=len(paths),done=0,phase='Чтение файлов',skipped=len(skipped))
+            paths,skipped=self.files();batch=[];progress(total=len(paths),done=0,phase='Чтение файлов',skipped=len(skipped))
             for index,path in enumerate(paths,1):
                 if cancel.is_set():break
                 progress(done=index-1,current=path.name)
@@ -238,12 +238,14 @@ class Workspace:
                     with db:
                         result,document_id=self.add_file(db,path)
                         self.event(db,'import',json.dumps({'source':str(path),'result':result,'document':document_id},ensure_ascii=False))
+                    batch.append({'file':path.name,'source':str(path),'status':result,'document_id':document_id})
                 except Exception as exc:
                     try:digest=sha256(path)
                     except OSError:digest='unreadable-'+hashlib.sha256(str(path).encode()).hexdigest()
                     with db:
                         db.execute("INSERT INTO arrivals(source,hash,category,error,created) VALUES (?,?,?,?,?) ON CONFLICT(source,hash) DO UPDATE SET error=excluded.error,status='pending'",(str(path),digest,'Ошибки',str(exc),now()))
                         self.touch(db)
+                    batch.append({'file':path.name,'source':str(path),'status':'Ошибка','reason':str(exc)})
                 progress(done=index)
             progress(phase='Сопоставление пациентов',current='')
             with db:self.resolve_patients(db)
@@ -255,6 +257,12 @@ class Workspace:
             # Path metadata in the workbook describes the durable planned destinations.
             result=self.summary(db)
             result['skipped_files']=len(skipped)
+            for item in batch:
+                if item['status']=='Добавлен':
+                    record=db.execute('SELECT patient_id FROM documents WHERE id=?',(item['document_id'],)).fetchone()
+                    if not record['patient_id']:item['status']='Уточнить пациента'
+            result['batch']=batch
+            result['remaining']=max(0,len(paths)-len(batch))
             progress(phase='Остановлено' if cancel.is_set() else 'Готово',summary=result)
             return result
 
@@ -284,6 +292,10 @@ class Workspace:
             'workbook':str(self.root/'Исследования.xlsx'),
         }
 
+    def problems(self):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute("SELECT * FROM arrivals WHERE category='Ошибки' OR status='pending' ORDER BY id")]
+
     def review_list(self):
         with self.connect() as db:
             result=[]
@@ -307,7 +319,9 @@ class Workspace:
         datetime.strptime(birth,'%Y-%m-%d')
         with self.lock(),self.connect() as db:
             self.backup(db)
-            if not db.execute('SELECT 1 FROM documents WHERE id=?',(document_id,)).fetchone():raise ValueError('Документ не найден')
+            record=db.execute('SELECT patient_id FROM documents WHERE id=?',(document_id,)).fetchone()
+            if not record:raise ValueError('Документ не найден')
+            if record['patient_id']:raise ValueError('Пациент уже подтверждён. Обновите список документов.')
             with db:
                 existing=db.execute('SELECT id FROM patients WHERE name=? AND birth=?',(name,birth)).fetchone()
                 patient_id=existing['id'] if existing else 'P-'+uuid.uuid4().hex[:12]
