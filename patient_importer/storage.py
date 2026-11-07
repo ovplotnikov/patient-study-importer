@@ -16,6 +16,12 @@ import portalocker
 from . import analysis, extraction, quality
 
 MANAGED={'Обработано','Нужно уточнить','Дубли','Ошибки','База','Резервные копии','Отложено'}
+DIAGNOSTIC_FORMATS = {
+    '.pdf': 'pdf', '.docx': 'docx', '.txt': 'txt',
+    '.png': 'image', '.jpg': 'image', '.jpeg': 'image', '.tif': 'image',
+    '.tiff': 'image', '.bmp': 'image',
+}
+EXTRACTED_DIAGNOSTIC_FORMATS = {'PDF': 'pdf', 'DOCX': 'docx', 'TXT': 'txt', 'Изображение': 'image'}
 
 
 def sha256(path):
@@ -30,7 +36,8 @@ def now():
 
 
 class Workspace:
-    def __init__(self, root):
+    def __init__(self, root, diagnostics=None):
+        self.diagnostics = diagnostics
         self.root=Path(root).expanduser().resolve()
         self.root.mkdir(parents=True,exist_ok=True)
         for name in MANAGED|{'Входящие'}:(self.root/name).mkdir(exist_ok=True)
@@ -103,6 +110,78 @@ class Workspace:
     def touch(self,db):
         db.execute("UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='revision'")
 
+    def _diagnostic(self, metric, code, count=1):
+        """Only predefined labels cross from the registry to the optional sink."""
+        if self.diagnostics is None:
+            return
+        try:
+            from .telemetry_schema import MAX_COUNT, METRICS
+            if (type(metric) is str and type(code) is str and code in METRICS.get(metric, ())
+                    and type(count) is int and 1 <= count <= MAX_COUNT):
+                self.diagnostics.record(metric, code, count)
+        except Exception:
+            # A diagnostic failure cannot affect the import or review result.
+            pass
+
+    def _diagnostics_enabled(self):
+        try:
+            return self.diagnostics is not None and getattr(self.diagnostics, 'enabled', True) is True
+        except Exception:
+            return False
+
+    @contextmanager
+    def _diagnostic_batch(self):
+        attempts = []
+        try:
+            yield attempts
+        finally:
+            for attempt in attempts:
+                if attempt['collect']:
+                    self._diagnostic('formats', attempt['format'])
+                    self._diagnostic('outcomes', attempt['outcome'])
+
+    @contextmanager
+    def _diagnostic_stage(self, stage):
+        try:
+            yield
+        except Exception:
+            self._diagnostic('failure_stages', stage)
+            raise
+
+    def _diagnostic_document(self, record, parsed):
+        if self.diagnostics is None:
+            return
+        try:
+            codes = {issue['code'] for issue in quality.issues(parsed) if type(issue.get('code')) is str}
+            if not record['patient_id']:
+                if parsed.get('identity_from_ocr'):
+                    codes.add('identity_from_ocr')
+                if len(parsed.get('names', ())) > 1 or len(parsed.get('births', ())) > 1:
+                    codes.add('ambiguous_identity')
+                if not parsed.get('names') or not parsed.get('births'):
+                    codes.add('missing_identity')
+            for code in codes:
+                self._diagnostic('review_reasons', code)
+        except Exception:
+            pass
+
+    def _export_workbook(self, db):
+        from .workbook import export_workbook
+        try:
+            export_workbook(self, db)
+        except Exception as exc:
+            # Check exception types and a known local lock indicator. Exception
+            # messages can contain patient details and are never sent to the sink.
+            stage = 'export'
+            try:
+                if (isinstance(exc, PermissionError) or isinstance(exc.__cause__, PermissionError)
+                        or (self.root/'~$Исследования.xlsx').exists()):
+                    stage = 'export_locked'
+            except OSError:
+                pass
+            self._diagnostic('failure_stages', stage)
+            raise
+
     def files(self):
         paths=[];skipped=[]
         for parent,dirs,files in os.walk(self.root,followlinks=False):
@@ -137,8 +216,11 @@ class Workspace:
             temporary.unlink(missing_ok=True)
         return target
 
-    def add_file(self,db,path):
+    def add_file(self,db,path,diagnostic_attempt=None):
+        attempt = diagnostic_attempt if diagnostic_attempt is not None else {}
+        attempt['stage'] = 'intake'
         digest=sha256(path)
+        attempt['stage'] = 'storage'
         previous=db.execute('''SELECT arrivals.* FROM arrivals JOIN documents ON arrivals.document_id=documents.id
                                WHERE arrivals.source=? AND arrivals.hash=? AND documents.hash=?''',
                             (str(path), digest, digest)).fetchone()
@@ -153,9 +235,15 @@ class Workspace:
             document_id=match['id']
         else:
             original=self.preserve(path,digest)
+            attempt['stage'] = 'extraction'
             extracted=extraction.extract(original)
-            parsed=analysis.analyze(extracted,path.name)
+            source_format = extracted.get('format')
+            if type(source_format) is str and source_format in EXTRACTED_DIAGNOSTIC_FORMATS:
+                attempt['format'] = EXTRACTED_DIAGNOSTIC_FORMATS[source_format]
             if not any(page.strip() for page in extracted['pages']):raise ValueError('В файле не обнаружен читаемый текст')
+            attempt['stage'] = 'analysis'
+            parsed=analysis.analyze(extracted,path.name)
+            attempt['stage'] = 'storage'
             fingerprint=analysis.content_fingerprint(extracted['pages'])
             matches = db.execute('SELECT * FROM documents WHERE fingerprint=? ORDER BY created,id', (fingerprint,)).fetchall() if fingerprint else []
             possible = []
@@ -290,25 +378,32 @@ class Workspace:
                     db.execute("UPDATE arrivals SET status='done',error='' WHERE id=?",(row['id'],))
                     self.event(db,'moved',json.dumps({'arrival':row['id'],'destination':str(target)},ensure_ascii=False))
             except OSError as exc:
+                self._diagnostic('failure_stages', 'archive')
                 with db:db.execute('UPDATE arrivals SET error=? WHERE id=?',('Не удалось переместить файл. Возможно, он открыт: '+str(exc),row['id']))
             except RuntimeError as exc:
+                self._diagnostic('failure_stages', 'archive')
                 with db:db.execute('UPDATE arrivals SET error=? WHERE id=?',(str(exc),row['id']))
 
     def import_folder(self,progress=lambda **state:None,cancel=None):
-        from .workbook import export_workbook
         cancel=cancel or threading.Event()
-        with self.lock(),self.connect() as db:
-            self.backup(db)
+        with self._diagnostic_batch() as attempts,self.lock(),self.connect() as db:
+            with self._diagnostic_stage('storage'):
+                self.backup(db)
             paths,skipped=self.files();batch=[];progress(total=len(paths),done=0,phase='Чтение файлов',skipped=len(skipped))
             for index,path in enumerate(paths,1):
                 if cancel.is_set():break
                 progress(done=index-1,current=path.name)
+                attempt = {'format': DIAGNOSTIC_FORMATS.get(path.suffix.lower(), 'other'),
+                           'stage': 'storage', 'outcome': 'error', 'collect': self._diagnostics_enabled()}
+                attempts.append(attempt)
                 try:
                     with db:
-                        result,document_id=self.add_file(db,path)
+                        result,document_id=self.add_file(db,path,attempt)
                         self.event(db,'import',json.dumps({'source':str(path),'result':result,'document':document_id},ensure_ascii=False))
                     batch.append({'file':path.name,'source':str(path),'status':result,'document_id':document_id})
                 except Exception as exc:
+                    if attempt['collect']:
+                        self._diagnostic('failure_stages', attempt['stage'])
                     try:digest=sha256(path)
                     except OSError:digest='unreadable-'+hashlib.sha256(str(path).encode()).hexdigest()
                     with db:
@@ -317,26 +412,47 @@ class Workspace:
                     batch.append({'file':path.name,'source':str(path),'status':'Ошибка','reason':str(exc)})
                 progress(done=index)
             progress(phase='Сопоставление пациентов',current='')
-            with db:self.resolve_patients(db)
+            with self._diagnostic_stage('storage'),db:self.resolve_patients(db)
             progress(phase='Сохранение таблицы')
-            export_workbook(self,db)
+            self._export_workbook(db)
             progress(phase='Перенос файлов')
-            self.finish_moves(db,progress)
-            self.backup(db)
+            with self._diagnostic_stage('archive'):
+                self.finish_moves(db,progress)
+            with self._diagnostic_stage('storage'):
+                self.backup(db)
             # Path metadata in the workbook describes the durable planned destinations.
             result=self.summary(db)
             result['skipped_files']=len(skipped)
-            for item in batch:
+            for item,attempt in zip(batch,attempts):
                 if item['status']=='Добавлен':
                     record=db.execute('SELECT * FROM documents WHERE id=?',(item['document_id'],)).fetchone()
+                    parsed = self._load_analysis(record)
+                    if attempt['collect']:
+                        self._diagnostic_document(record, parsed)
                     if not record['patient_id']:
                         item['status']='Уточнить пациента'
-                    elif quality.needs_review(self._load_analysis(record)):
+                    elif quality.needs_review(parsed):
                         item['status']='Проверить данные'
+                self._diagnostic_import_outcome(db, item, attempt)
             result['batch']=batch
             result['remaining']=max(0,len(paths)-len(batch))
             progress(phase='Остановлено' if cancel.is_set() else 'Готово',summary=result)
             return result
+
+    def _diagnostic_import_outcome(self, db, item, attempt):
+        if not attempt['collect'] or item['status'] == 'Ошибка':
+            return
+        outcomes = {'Добавлен': 'saved', 'Повтор': 'duplicate',
+                    'Уточнить пациента': 'identity_review', 'Проверить данные': 'quality_review'}
+        try:
+            pending = db.execute(
+                "SELECT 1 FROM arrivals WHERE document_id=? AND source=? AND status='pending' LIMIT 1",
+                (item['document_id'], item['source']),
+            ).fetchone()
+            if not pending:
+                attempt['outcome'] = outcomes[item['status']]
+        except Exception:
+            pass
 
     def backup(self,db):
         if not db.execute('SELECT 1 FROM documents LIMIT 1').fetchone():return
@@ -398,7 +514,6 @@ class Workspace:
 
     def assign(self,document_id,name,birth):
         from .parsing import FULL_NAME,normalized
-        from .workbook import export_workbook
         import re
         name=normalized(name)
         if not re.fullmatch(FULL_NAME,name):raise ValueError('Укажите фамилию, имя и отчество полностью')
@@ -415,7 +530,8 @@ class Workspace:
                 db.execute('UPDATE documents SET patient_id=?,decision=?,reason=? WHERE id=?',(patient_id,now(),'Пациент подтверждён пользователем',document_id))
                 self._schedule_category(db, document_id, self._category({'patient_id': patient_id}, self._load_analysis(record)))
                 self.touch(db);self.event(db,'patient_confirmed',document_id)
-            export_workbook(self,db)
+            self._diagnostic('edit_categories', 'identity')
+            self._export_workbook(db)
             self.finish_moves(db,lambda **kw:None)
             self.backup(db)
         return self.summary()
@@ -469,17 +585,47 @@ class Workspace:
         # Most export failures happen when Excel has the workbook open. Check
         # before recording a new decision so the user can close it and retry.
         if (self.root/'~$Исследования.xlsx').exists():
+            self._diagnostic('failure_stages', 'export_locked')
             raise RuntimeError('Закройте таблицу «Исследования» в Excel и повторите действие.')
 
     def _finish_review_change(self, db):
-        from .workbook import export_workbook
         try:
-            export_workbook(self, db)
+            self._export_workbook(db)
         except Exception as exc:
             raise RuntimeError('Решение сохранено в базе. Закройте Excel и нажмите «Обработать», чтобы обновить таблицу. '+str(exc)) from exc
         self.finish_moves(db, lambda **state: None)
         self.backup(db)
         return self.summary(db)
+
+    def _diagnostic_review_changes(self, record, parsed):
+        if self.diagnostics is None:
+            return
+        try:
+            previous = self._with_result_ids(record['id'], self._load_analysis(record))
+            categories = set()
+            if previous['type'] != parsed['type']:
+                categories.add('study_type')
+            if previous['date'] != parsed['date']:
+                categories.add('study_date')
+            old_rows = {item['result_id']: item for item in previous['observations']}
+            new_rows = {item['result_id']: item for item in parsed['observations']}
+            if old_rows.keys() != new_rows.keys():
+                categories.add('observation')
+            for result_id in old_rows.keys() & new_rows.keys():
+                old, new = old_rows[result_id], new_rows[result_id]
+                for field, code in (('result', 'result'), ('unit', 'unit'), ('reference', 'reference'),
+                                    ('date', 'study_date'), ('label', 'observation'), ('side', 'observation'),
+                                    ('section', 'observation')):
+                    if old.get(field) != new.get(field):
+                        categories.add(code)
+            old_conclusions = [(item['section'], item['text']) for item in previous['sections']]
+            new_conclusions = [(item['section'], item['text']) for item in parsed['sections']]
+            if old_conclusions != new_conclusions:
+                categories.add('conclusion')
+            for code in categories:
+                self._diagnostic('edit_categories', code)
+        except Exception:
+            pass
 
     @staticmethod
     def _review_date(value):
@@ -602,13 +748,15 @@ class Workspace:
             parsed['quality'].update(confirmed=True, protected=True, confirmed_at=now(), note=note,
                                      incomplete=bool(incomplete), accepted_missing=incomplete)
             self.backup(db)
-            with db:
+            with self._diagnostic_stage('review'),db:
                 self._save_study_history(db, record, 'quality_confirmed', note)
                 db.execute('UPDATE documents SET analysis=? WHERE id=?',
                            (json.dumps(parsed, ensure_ascii=False), document_id))
                 self._schedule_category(db, document_id, self._category(record, parsed))
                 self.touch(db)
                 self.event(db, 'quality_confirmed', document_id)
+            self._diagnostic('review_outcomes', 'confirmed_incomplete' if incomplete else 'confirmed')
+            self._diagnostic_review_changes(record, parsed)
             return self._finish_review_change(db)
 
     def mark_duplicate(self, document_id, target_id, note, expected_revision=None):
@@ -629,13 +777,14 @@ class Workspace:
             parsed['duplicate_of'] = target_id
             parsed['quality'].update(confirmed=True, confirmed_at=now(), note=note)
             self.backup(db)
-            with db:
+            with self._diagnostic_stage('review'),db:
                 self._save_study_history(db, record, 'duplicate_confirmed', note)
                 db.execute('UPDATE documents SET analysis=? WHERE id=?',
                            (json.dumps(parsed, ensure_ascii=False), document_id))
                 self._schedule_category(db, document_id, 'Дубли')
                 self.touch(db)
                 self.event(db, 'duplicate_confirmed', json.dumps({'id': document_id, 'target': target_id}))
+            self._diagnostic('review_outcomes', 'excluded')
             return self._finish_review_change(db)
 
     @staticmethod
@@ -753,7 +902,7 @@ class Workspace:
                 owner = db.execute('SELECT name,birth FROM patients WHERE id=?', (record['patient_id'],)).fetchone()
                 if parsed['names'] != [owner['name']] or parsed['births'] != [owner['birth']]:
                     parsed['reprocess_identity_changed'] = True
-            with db:
+            with self._diagnostic_stage('review'),db:
                 self._save_study_history(db, record, 'reprocessed', '', proposal=proposed)
                 db.execute('UPDATE documents SET extracted=?,analysis=?,fingerprint=? WHERE id=?',
                            (json.dumps(extracted, ensure_ascii=False), json.dumps(parsed, ensure_ascii=False),
@@ -761,6 +910,7 @@ class Workspace:
                 self.touch(db)
                 self.resolve_patients(db)
                 self.event(db, 'reprocessed', document_id)
+            self._diagnostic('review_outcomes', 'reprocessed')
             return self._finish_review_change(db)
 
     def document_list(self):

@@ -35,7 +35,7 @@ ocr_runtime = audit_archive(exe, crt_revision)
 docs_target=root/'dist'/'docs';docs_target.mkdir(exist_ok=True)
 for name in ['Краткая инструкция.pdf','guide.html']:
     shutil.copy2(root/'build'/'guide'/name,docs_target/name)
-for name in ['USER_GUIDE.md','CODEX_INSTALL.md','SUPPORTED_FORMS.md','PRIVACY.md']:
+for name in ['USER_GUIDE.md','CODEX_INSTALL.md','SUPPORTED_FORMS.md','PRIVACY.md','TELEMETRY.md']:
     shutil.copy2(root/'docs'/name,docs_target/name)
 license_root=root/'dist'/'Лицензии';license_root.mkdir(exist_ok=True)
 shutil.copy2(root/'LICENSE',license_root/'PatientStudyImporter-MIT.txt')

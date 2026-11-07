@@ -10,6 +10,7 @@ from unittest.mock import patch
 def run(root):
     root=Path(root).resolve();root.mkdir(parents=True,exist_ok=True)
     os.environ['PATIENT_IMPORTER_NO_UPDATE_CHECK']='1'
+    os.environ['PATIENT_IMPORTER_NO_DIAGNOSTICS_PROMPT']='1'
     settings=root/'isolated-settings';settings_dir=settings/'PatientStudyImporter';settings_dir.mkdir(parents=True,exist_ok=True)
     workspace=root/'gui-workspace';workspace.mkdir(exist_ok=True)
     os.environ['APPDATA']=str(settings);os.environ['LOCALAPPDATA']=str(settings)
@@ -198,6 +199,40 @@ def run(root):
         from .help_view import help_path
         help_file=help_path();html=help_file.read_text(encoding='utf8')
         assert __version__ in html and 'data:image/png;base64,' in html
+    # Explicit opt-in and withdrawal use isolated fake configuration, never the network.
+    from . import diagnostics_config
+    from .telemetry import Diagnostics
+    from .diagnostics_ui import DiagnosticsWindow, SupportWindow
+    test_diagnostics=Diagnostics(settings_dir/'test-diagnostics', endpoint='https://diagnostics.example.org/v1/counters')
+    assert test_diagnostics.should_prompt() and test_diagnostics.mark_prompted()
+    assert not test_diagnostics.enabled
+    dialog=DiagnosticsWindow(app.root,test_diagnostics,'https://diagnostics.example.org/v1/counters',first_run=True)
+    settle();visible(dialog.allow_button);visible(dialog.decline_button)
+    capture('11-diagnostics.png',dialog.window)
+    dialog.allow_button.invoke()
+    deadline=time.monotonic()+10
+    while dialog.window.winfo_exists():
+        settle();time.sleep(.03);assert time.monotonic()<deadline
+    assert test_diagnostics.enabled
+    test_diagnostics.record('formats','pdf',10)
+    dialog=DiagnosticsWindow(app.root,test_diagnostics,'https://diagnostics.example.org/v1/counters')
+    dialog.decline_button.invoke()
+    deadline=time.monotonic()+10
+    while dialog.window.winfo_exists():
+        settle();time.sleep(.03);assert time.monotonic()<deadline
+    assert not test_diagnostics.enabled and test_diagnostics.snapshot() is None
+    next_version=Diagnostics(settings_dir/'test-diagnostics',endpoint='https://diagnostics.example.org/v1/counters',app_version='2.5.0')
+    assert not next_version.should_prompt() and not next_version.enabled
+    dialog=SupportWindow(app.root,'templates@example.org');settle()
+    visible(dialog.mail_button);visible(dialog.attest)
+    assert str(dialog.mail_button['state'])=='disabled'
+    capture('12-template-help.png',dialog.window)
+    with patch('patient_importer.diagnostics_ui.webbrowser.open',return_value=True) as compose:
+        dialog.compose();compose.assert_not_called()
+        dialog.attest.invoke();dialog.mail_button.invoke()
+        assert compose.call_count==1 and compose.call_args.args[0].startswith('mailto:templates@example.org?')
+        assert 'attach' not in compose.call_args.args[0]
+    dialog.window.destroy()
     app.root.destroy()
     # 144 DPI (150% at the usual 96-DPI baseline), fresh Tcl interpreter.
     dpi_workspace=root/'dpi-workspace';dpi_workspace.mkdir()
@@ -205,6 +240,12 @@ def run(root):
     app=Application(tk_scaling=2.0)
     app.root.report_callback_exception=lambda typ,value,tb:errors.append(str(value))
     settle();visible(app.start_button);visible(app.add_button)
+    dialog=DiagnosticsWindow(app.root,test_diagnostics,'https://diagnostics.example.org/v1/counters')
+    settle();visible(dialog.allow_button);visible(dialog.decline_button)
+    capture('diagnostics-150-percent.png',dialog.window);dialog.window.destroy()
+    dialog=SupportWindow(app.root,'templates@example.org');settle()
+    visible(dialog.mail_button);visible(dialog.attest)
+    capture('template-help-150-percent.png',dialog.window);dialog.window.destroy()
     app.stage([first,third]);finish();app.start();finish();app.review();settle()
     capture('review-150-percent.png',app.review_window.window)
     visible(app.review_window.confirm_button)
@@ -248,4 +289,7 @@ def run(root):
     app.root.destroy()
     ocr_patch.stop()
     result={'ok':True,'checks':['empty_state','picker_or_native_drop_callback','external_originals_preserved','same_patient_incremental_import','per_file_results','small_window_buttons','wheel_over_row','150_percent_layout','visible_candidates','pdf_preview_pages_zoom','confirmation_clears_selection','repeat_confirmation_blocked','consistent_result_state','quality_stays_pending_after_identity','explicit_quality_attestation','inequality_and_corrected_unit_preserved','quality_small_window_and_150_percent','reprocess_preview_apply_same_study','stale_workbook_requires_save','narrative_text_correction','manual_duplicate_comparison','deduplication','actionable_errors','retry_returns_to_queue','stop_and_resume','automatic_update_offer_decline','embedded_help' if getattr(sys,'frozen',False) else 'source_capture']}
+    result['checks'].extend(['diagnostics_explicit_opt_in','diagnostics_withdrawal_clears_queue',
+                             'diagnostics_refusal_survives_update','manual_template_draft_no_attachment',
+                             'diagnostics_and_support_150_percent_layout'])
     (root/'ui-test.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf8')
