@@ -118,6 +118,7 @@ class OcrEvidenceTests(unittest.TestCase):
                       'Глюкоза ≤0,50 мкмоль/л', 'Глюкоза ≤0,50 ммоль/π'):
             self.assertFalse(same_reading(reference, reading(other)))
         self.assertFalse(same_reading(reading('71,5 mg/L'), reading('71,5 Mg/L')))
+        self.assertFalse(same_reading(reading('3,2 mM'), reading('3,2 mm')))
         self.assertTrue(same_reading(reading('−12,6 г/л'), reading(' -12,6  г/л')))
 
 

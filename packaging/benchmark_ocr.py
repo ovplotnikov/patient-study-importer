@@ -64,12 +64,14 @@ def synthetic_form(font, layout, holdout, *, validation=False):
     order = [0, 2, 1, 3] if layout == 2 else [0, 1, 2, 3]
     if validation:
         order = [1, 0, 2, 3]
-    header = ('Показатель', 'Результат', 'Единицы', 'Референсные значения')
+    header = ('Показатель', 'Результат', 'Единицы', 'Норма')
     for i, row in enumerate([header]+values):
         y = 417+i*83
         if layout == 1:
             draw.line((x-12, y-8, 1370, y-8), fill='#ababab', width=2)
         for column, index in zip(columns, order):
+            if draw.textbbox((column, y), row[index], font=font_main)[2] > image.width:
+                raise ValueError(f'Synthetic field exceeds image width: {row[index]}')
             draw.text((column, y), row[index], font=font_main, fill='black')
     expected = '\n'.join(intro+[' '.join(row[i] for i in order) for row in [header]+values])
     fields = [title, person, born, date]
@@ -98,6 +100,10 @@ def main():
     parser.add_argument('--validation-font', help='Compare the fixed selected engine and baseline on fresh layouts only')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
+    if args.cyrillic and not args.onnx:
+        parser.error('--cyrillic requires --onnx')
+    if args.validation_font and not args.cyrillic:
+        parser.error('--validation-font requires --onnx and --cyrillic')
     engines = {name: lambda image, name=name, data=data: tesseract_page(
         image, args.tesseract, data, name
     ) for name, data in [('tesseract-fast', args.fast), ('tesseract-best', args.best)]}
@@ -147,8 +153,9 @@ def main():
                         for item in observations
                     }
                     parsed_exact = sum(tuple(whitespace(value) for value in row) in parsed_rows for row in values)
-                    parsed_triplet = sum(tuple(whitespace(value) for value in row[:3]) in
-                                         {parsed[:3] for parsed in parsed_rows} for row in values)
+                    parsed_triplets = {parsed[:3] for parsed in parsed_rows}
+                    parsed_triplet = sum(tuple(whitespace(value) for value in row[:3]) in parsed_triplets
+                                         for row in values)
                     records.append(dict(engine=name, split=split,
                                         layout=layout, defect=defect, fields=field_ok, field_count=len(fields),
                                         rows=row_ok, row_count=len(rows), exact_page=int(field_ok==len(fields) and row_ok==len(rows)),

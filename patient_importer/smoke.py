@@ -87,8 +87,13 @@ def smoke_ocr(root):
     image.save(pdf_path, 'PDF', resolution=180)
     mixed_path = root/'ocr-mixed.pdf'
     make_mixed_pdf(pdf_path, mixed_path)
+    from unittest.mock import patch
+    def offline_extract(path):
+        with patch('urllib.request.urlopen',side_effect=AssertionError('OCR must work offline')), \
+             patch('requests.sessions.Session.request',side_effect=AssertionError('OCR must work offline')):
+            return extract(path)
     for path in (image_path, pdf_path, mixed_path):
-        data = extract(path)
+        data = offline_extract(path)
         recognized = ' '.join(' '.join(data['pages']).casefold().split())
         assert all(line.casefold() in recognized for line in text), (path.name, recognized)
         assert data['ocr_pages'], path.name

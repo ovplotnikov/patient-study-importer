@@ -48,10 +48,20 @@ class SourcePreview(ttk.Frame):
         self.xscroll=ttk.Scrollbar(body,orient='horizontal',command=self.canvas.xview);self.xscroll.pack(side='bottom',fill='x')
         self.canvas.configure(yscrollcommand=self.scroll.set,xscrollcommand=self.xscroll.set)
         self.text.configure(yscrollcommand=self.scroll.set)
+        self.resize_job=None;self.canvas.bind('<Configure>',self.schedule_render)
         self.bind('<Destroy>',self.destroy_preview)
 
     def destroy_preview(self,event):
-        if event.widget is self and self.pdf:self.pdf.close();self.pdf=None
+        if event.widget is self:
+            if self.resize_job:self.after_cancel(self.resize_job);self.resize_job=None
+            if self.pdf:self.pdf.close();self.pdf=None
+
+    def schedule_render(self,event):
+        if self.resize_job:self.after_cancel(self.resize_job)
+        def render():
+            self.resize_job=None
+            if self.document:self.render()
+        self.resize_job=self.after(100,render)
 
     def load(self,document,analysis):
         from PIL import Image,ImageOps,ImageSequence
@@ -179,7 +189,7 @@ class QualityReviewWindow:
         self.panes.add(self.preview,weight=1);self.panes.add(right,weight=1)
         bottom=ttk.Frame(right);bottom.pack(side='bottom',fill='x',pady=(8,0))
         self.verified=tk.BooleanVar(value=False)
-        self.attest=ttk.Checkbutton(bottom,text='Сверены все страницы и строки оригинала',variable=self.verified,command=self.enable_confirm)
+        self.attest=ttk.Checkbutton(bottom,text='Все страницы и строки сверены',variable=self.verified,command=self.enable_confirm)
         self.attest.pack(anchor='w')
         self.confirm_button=ttk.Button(bottom,text='Подтвердить данные',style='Primary.TButton',command=self.confirm,state='disabled');self.confirm_button.pack(fill='x',pady=(8,0))
         self.editor_area=ui.ScrollArea(right);self.editor_area.pack(fill='both',expand=True)
@@ -210,6 +220,7 @@ class QualityReviewWindow:
         ttk.Label(fields,text='Замечание / причина отсутствующих данных').pack(anchor='w')
         self.note=tk.Text(fields,height=3,wrap='word',font=(ui.FONT,11),relief='solid',borderwidth=1,padx=6,pady=6,bg='white',fg=ui.INK);self.note.pack(fill='x',pady=(4,6))
         self.validation=tk.StringVar();ttk.Label(fields,textvariable=self.validation,foreground='#b42318',wraplength=420).pack(anchor='w')
+        self.editor_area.canvas.bind('<Configure>',lambda event:[label.configure(wraplength=max(200,event.width-8)) for label in (self.issue_label,self.source_label)],add='+')
         self.success=ttk.Frame(outer,padding=40)
         ttk.Label(self.success,image=icons.get('check-circle','green',64)).pack(pady=15)
         ttk.Label(self.success,text='Данные проверены',style='Heading.TLabel').pack(pady=8)
@@ -242,6 +253,9 @@ class QualityReviewWindow:
         self.verified.set(False);self.enable_confirm();self.validation.set('');self.note.delete('1.0','end')
         from collections import Counter
         counts=Counter(i['code'] for i in record['issues']);messages={i['code']:i['message'] for i in reversed(record['issues'])}
+        if 'OCR_USED' in messages:
+            for code in ('ocr_value','ocr_text'):messages.pop(code,None)
+        elif 'ocr_value' in messages:messages['ocr_value']='Сверьте результаты со скана.'
         self.issue_label.configure(text='\n'.join('• '+message+(f' (строк: {counts[code]})' if counts[code]>1 else '') for code,message in list(messages.items())[:3]))
         self.details_button.pack_forget();self.alternatives_button.pack_forget()
         if len(record['issues'])>3:self.details_button.pack(anchor='w',after=self.issue_label,pady=(0,6))

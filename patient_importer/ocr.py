@@ -177,6 +177,7 @@ def rapid_page(image, engine, *, improve_geometry=False, engine_name='paddle-cyr
     return max(alternatives, key=orientation_score) if any(p.text for p in alternatives) else page
 
 def same_reading(primary, other):
+    """Compare text line by line, preserving case in printed units."""
     def normalized_lines(page):
         # Spacing and equivalent minus glyphs do not change a reading.
         return [' '.join(line.text.replace('−', '-').split())
