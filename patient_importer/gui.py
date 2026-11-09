@@ -12,7 +12,7 @@ import tkinter as tk
 from tkinter import filedialog,messagebox,ttk
 import traceback
 from .pdf_render import PDFIUM_LOCK
-from .storage import Workspace
+from .storage import ReviewCommittedError,Workspace
 from . import __version__,updater,intake,ui,diagnostics_config
 from .telemetry import Diagnostics
 
@@ -175,7 +175,13 @@ class Application:
     def choose(self):
         if self.workspace_busy() or self.workspace_window_open():return
         selected=filedialog.askdirectory(title='Рабочая папка с базой и таблицей',initialdir=self.folder_var.get(),parent=self.root)
-        if selected:self.select(selected)
+        if not selected:return
+        found=intake.documents_in_folder(selected)
+        if found and not messagebox.askyesno('Переместить документы?',
+                f'В этой папке есть документы: {found}. При обработке программа перенесёт их в свои папки внутри выбранной.\n\n'
+                'Лучше выбрать пустую папку, а документы добавить кнопкой. Всё равно использовать эту папку?',
+                default='no',icon='warning',parent=self.root):return
+        self.select(selected)
 
     def row(self,name,subtitle,icon=None,action=None,action_text=None):
         row=ttk.Frame(self.content.body,padding=(4,8));row.pack(fill='x')
@@ -241,7 +247,7 @@ class Application:
         summary=self.refresh(None if rescan else self.list_summary)
         self.documents_page,visible=self.visible_list_page(self.paths,self.documents_page)
         attention=bool(summary['total_review'] or summary['errors'] or summary['pending_moves'] or summary.get('pending_export'))
-        rendered=(tuple(visible),attention,summary['total_review'],summary['errors'])
+        rendered=(tuple(visible),attention,summary['total_review'],summary['errors'],summary.get('reparse',0))
         if rendered==self.rendered_queue:return
         self.content.clear()
         self.rendered_queue=rendered
@@ -252,8 +258,39 @@ class Application:
             ttk.Label(empty,text='Выберите файлы или целую папку',style='Muted.TLabel').pack()
         for path in visible:
             self.row(path.name,path.suffix.upper().lstrip('.') or 'Документ',action=lambda p=path:self.remove_file(p))
+        self.reparse_row(summary)
         if attention:
             self.row('Требуют внимания',f"Проверить документы: {summary['total_review']} · Ошибки: {summary['errors']}",self.icons.get('exclamation-triangle','amber',32),self.show_result,'Посмотреть')
+
+    def reparse_row(self,summary):
+        if summary.get('reparse'):
+            self.row('Программа стала лучше читать бланки',f"Можно обновить документы: {summary['reparse']} · Подтверждённые вручную не изменятся",
+                     self.icons.get('exclamation-triangle','amber',32),self.reparse,'Обновить')
+
+    def reparse(self):
+        if not self.workspace or self.workspace_busy() or self.workspace_window_open():return
+        count=self.workspace.summary().get('reparse',0)
+        if not count:return
+        if not messagebox.askyesno('Обновить разбор',
+                f'Пересчитать документы по новым правилам: {count}?\n\nОригиналы и документы, подтверждённые вручную, не изменятся. '
+                'Перед пересчётом будет сделана резервная копия, прежний результат останется в истории. '
+                'Закройте таблицу в Excel.',parent=self.root):return
+
+        def completed(report,error):
+            self.current.set('')
+            if isinstance(error,ReviewCommittedError):messagebox.showwarning('Документы обновлены',str(error),parent=self.root)
+            elif error is not None:messagebox.showerror('Не удалось обновить разбор',str(error),parent=self.root)
+            else:
+                lines=[f"Обновлено документов: {report['updated']}",f"Строк в лабораторных таблицах: было {report['rows_before']}, стало {report['rows_after']}"]
+                if report['kept']:lines.append(f"Оставлено без изменений: {report['kept']}. Новый разбор нашёл в них меньше строк")
+                if report['reviewed']:lines.append(f"Подтверждённые вручную не изменялись: {report['reviewed']}")
+                messagebox.showinfo('Разбор обновлён','\n'.join(lines),parent=self.root)
+            self.rendered_queue=None
+            if self.screen=='documents':self.show_documents(rescan=False)
+            else:self.refresh()
+
+        if self.workspace_actions.run(self.workspace.reparse_unconfirmed,completed):
+            self.current.set('Обновляем разбор документов и таблицу…')
 
     def add_files(self):
         if self.workspace_busy() or self.workspace_window_open():return
@@ -330,6 +367,7 @@ class Application:
         else:
             self.new_button.pack(side='right');self.excel_button.configure(style='Primary.TButton',image=self.icons.get('table','white'))
         self.excel_button.configure(state='normal' if Path(summary['workbook']).exists() and not summary.get('pending_export') else 'disabled')
+        self.reparse_row(summary)
         if summary['review']:self.row('Уточните пациента',f"Документов: {summary['review']}",self.icons.get('exclamation-triangle','amber',32),self.review,'Проверить')
         if summary['quality_review']:self.row('Сверьте данные с оригиналом',f"Документов: {summary['quality_review']} · Показатели пока не подтверждены",self.icons.get('exclamation-triangle','amber',32),self.review,'Проверить')
         if summary.get('incomplete'):self.row('Сверено с замечаниями',f"Документов: {summary['incomplete']} · Причины сохранены в таблице",self.icons.get('exclamation-triangle','amber',32),self.history,'Посмотреть')

@@ -217,7 +217,7 @@ class AppsScriptTests(unittest.TestCase):
             'maxReportBytes': MAX_REPORT_BYTES,
             'maxCount': MAX_COUNT,
             'minAttempts': MIN_ATTEMPTS,
-            'versions': [VERSION, NEXT_VERSION],
+            'versions': [VERSION, NEXT_VERSION, '2.5.0'],
             'metrics': {key: sorted(codes) for key, codes in METRICS.items()},
         })
 

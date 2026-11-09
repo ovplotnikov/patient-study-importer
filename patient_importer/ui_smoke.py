@@ -65,6 +65,13 @@ def run(root):
             finally:release.set()
             finish()
         assert len(calls)==1
+    def close_review(window):
+        # Closing the review window rebuilds the workbook once for the whole session.
+        window.close();finish()
+        deadline=time.monotonic()+60
+        while window.window.winfo_exists():
+            settle();time.sleep(.04);assert time.monotonic()<deadline,'Workbook update did not finish'
+        settle()
     def visible(button):
         window=button.winfo_toplevel()
         assert button.winfo_ismapped(),str(button)
@@ -207,7 +214,7 @@ def run(root):
     check_background_save('confirm_quality',quality.confirm_button.invoke,while_quality_pending)
     assert quality.selected is None and not quality.records
     assert app.workspace.summary()['total_review']==0
-    capture('09-quality-finished.png',quality.window);quality.window.destroy();settle()
+    capture('09-quality-finished.png',quality.window);close_review(quality)
     assert app.heading.cget('text')=='Документы сохранены'
     capture('05-finished.png')
     app.history();settle();history=app.history_window
@@ -346,7 +353,7 @@ def run(root):
     with app.workspace.connect() as db:
         parsed=json.loads(db.execute('SELECT analysis FROM documents').fetchone()[0])
         assert parsed['sections'][-1]['text']=='Заключение: учебный текст сверён и исправлен.'
-    quality.window.destroy();app.select(root/'duplicate-extras');settle()
+    close_review(quality);app.select(root/'duplicate-extras');settle()
     original_text=SAMPLE.replace('мкмоль/л','мкмоль/π')
     pair=[]
     for index in range(2):
@@ -359,6 +366,31 @@ def run(root):
     quality.duplicate_window.confirm();finish()
     assert app.workspace.summary()['documents']==1 and app.workspace.summary()['duplicates']==1
     quality.window.destroy()
+    # Text documents go through the queue of stumbles and save themselves.
+    app.select(root/'queue-extras');settle()
+    queued=external/'Очередь.txt';queued.write_text(SAMPLE.replace('мкмоль/л','мкмоль/π'),encoding='utf8')
+    app.stage([queued]);finish();app.start();finish();app.review();settle()
+    quality=app.review_window
+    assert not quality.full_mode and quality.current['kind']=='row'
+    visible(quality.accept_button);capture('06-queue.png',quality.window)
+    quality.window.geometry('900x650');settle();visible(quality.accept_button);visible(quality.whole_button)
+    capture('queue-small-window.png',quality.window)
+    quality.vars['unit'].set('мкмоль/л');quality.accept_button.invoke()
+    deadline=time.monotonic()+60
+    while quality.save_queue or quality.finishing or quality.session_saved or app.workspace_actions.active:
+        settle();time.sleep(.04);assert time.monotonic()<deadline,'Queue save timeout'
+    assert app.workspace.summary()['total_review']==0
+    close_review(quality)
+    # Documents of an earlier version are offered a recalculation that keeps the workbook usable.
+    with app.workspace.connect() as db,db:
+        rows=db.execute('SELECT id,analysis FROM documents').fetchall()
+        for row in rows:
+            old=json.loads(row['analysis']);old['version']='2.3.0';old['quality']={'issues':[],'confirmed':False}
+            db.execute('UPDATE documents SET analysis=? WHERE id=?',(json.dumps(old,ensure_ascii=False),row['id']))
+    app.refresh();settle();assert app.workspace.summary()['reparse']==1
+    with patch.object(messagebox,'askyesno',return_value=True),patch.object(messagebox,'showinfo') as reported:
+        app.reparse();finish()
+    reported.assert_called_once();assert app.workspace.summary()['reparse']==0
     # Long queues retain their visible widgets across focus and expose every file.
     queue_root=root/'long-queue'
     incoming=queue_root/'Входящие';incoming.mkdir(parents=True)

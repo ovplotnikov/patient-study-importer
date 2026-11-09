@@ -75,6 +75,7 @@ const WIRE_SCHEMA = {
       "missing_unit",
       "ocr_text",
       "ocr_value",
+      "page_without_patient",
       "type_mismatch",
       "unknown_type",
       "unknown_unit",
@@ -87,7 +88,8 @@ const WIRE_SCHEMA = {
   "schemaVersion": 1,
   "versions": [
     "2.4.0",
-    "2.4.1"
+    "2.4.1",
+    "2.5.0"
   ]
 };
 

@@ -16,6 +16,8 @@ import portalocker
 from . import analysis, extraction, quality
 from .telemetry_schema import MAX_COUNT, METRICS
 
+KEEP_NEWEST_BACKUPS=20
+KEEP_DAILY_BACKUPS=14
 MANAGED={'Обработано','Нужно уточнить','Дубли','Ошибки','База','Резервные копии','Отложено'}
 # None is a captured absence of consent, not a request to capture it again.
 _CURRENT_EPOCH = object()
@@ -511,14 +513,19 @@ class Workspace:
             finally:snapshot.close()
             os.replace(temporary,target)
         finally:temporary.unlink(missing_ok=True)
-        for old in sorted(folder.glob('База_*.sqlite'))[:-20]:old.unlink()
+        # The newest copies cover today. The last copy of each recent day survives a long session.
+        copies=sorted(folder.glob('База_*.sqlite'))
+        daily={path.name[5:13]:path for path in copies}
+        keep=set(copies[-KEEP_NEWEST_BACKUPS:])|set(list(daily.values())[-KEEP_DAILY_BACKUPS:])
+        for old in copies:
+            if old not in keep:old.unlink()
 
     def summary(self,db=None):
         if db is None:
             with self.connect() as connection:return self.summary(connection)
         has_documents = False
         patients = set()
-        documents = identity = uncertain = total_review = incomplete = 0
+        documents = identity = uncertain = total_review = incomplete = reparse = 0
         for row in db.execute('SELECT id, patient_id, analysis FROM documents'):
             has_documents = True
             parsed = self._load_analysis(row, db=db)
@@ -534,6 +541,7 @@ class Workspace:
             uncertain += needs_quality
             total_review += needs_identity or needs_quality
             incomplete += bool(parsed['quality'].get('confirmed') and parsed['quality'].get('incomplete'))
+            reparse += self._can_reparse(parsed)
         workbook = self.root / 'Исследования.xlsx'
         exported = db.execute("SELECT value FROM meta WHERE key='exported_revision'").fetchone()
         pending_export = has_documents and (
@@ -551,6 +559,7 @@ class Workspace:
             'quality_review': uncertain,
             'total_review': total_review,
             'incomplete': incomplete,
+            'reparse': reparse,
             **dict(arrivals),
             'workbook': str(workbook),
         }
@@ -588,12 +597,47 @@ class Workspace:
                 result.update((row['id'], dict(row)) for row in db.execute(query, chunk))
         return result
 
-    def assign(self,document_id,name,birth):
-        from .parsing import FULL_NAME,normalized
-        import re
+    @staticmethod
+    def _checked_patient(name,birth):
+        from .parsing import WORD,normalized
         name=normalized(name)
-        if not re.fullmatch(FULL_NAME,name):raise ValueError('Укажите фамилию, имя и отчество полностью')
+        # Children and foreign patients often have no patronymic.
+        if not re.fullmatch(rf'{WORD}(?: {WORD}){{1,5}}',name):raise ValueError('Укажите фамилию и имя полностью')
         datetime.strptime(birth,'%Y-%m-%d')
+        return name
+
+    def change_patient(self,document_id,name,birth,note=''):
+        """Correct a wrong assignment. The previous owner stays in the study history."""
+        name=self._checked_patient(name,birth)
+        epoch = self._diagnostic_epoch()
+        with self.lock(),self.connect() as db:
+            record=self._checked_document(db,document_id)
+            if self._load_analysis(record).get('duplicate_of'):
+                raise ValueError('Смените пациента у основного исследования.')
+            self._preflight_workbook()
+            self.backup(db)
+            with db:
+                existing=db.execute('SELECT id FROM patients WHERE name=? AND birth=?',(name,birth)).fetchone()
+                patient_id=existing['id'] if existing else 'P-'+uuid.uuid4().hex[:12]
+                if patient_id==record['patient_id']:raise ValueError('Этот пациент уже назначен документу.')
+                previous=db.execute('SELECT name,birth FROM patients WHERE id=?',(record['patient_id'],)).fetchone()
+                was=f"{previous['name']}, {previous['birth']}" if previous else 'не назначен'
+                self._save_study_history(db,record,'patient_changed',' '.join(filter(None,(f'Прежний пациент: {was}.',note.strip()))))
+                db.execute('INSERT OR IGNORE INTO patients VALUES (?,?,?)',(patient_id,name,birth))
+                db.execute('UPDATE documents SET patient_id=?,decision=?,reason=?,candidates=? WHERE id=?',
+                           (patient_id,now(),'Пациент изменён пользователем','[]',document_id))
+                # Confirmed repeats of this study follow it.
+                for other in db.execute('SELECT id,analysis FROM documents WHERE patient_id=? AND id!=?',(record['patient_id'],document_id)).fetchall():
+                    if json.loads(other['analysis']).get('duplicate_of')==document_id:
+                        db.execute('UPDATE documents SET patient_id=?,decision=? WHERE id=?',(patient_id,now(),other['id']))
+                parsed=self._load_analysis(record)
+                self._schedule_category(db,document_id,self._category({'patient_id':patient_id},parsed))
+                self.touch(db);self.event(db,'patient_changed',document_id)
+            self._diagnostic('edit_categories','identity',epoch=epoch)
+            return self._finish_review_change(db)
+
+    def assign(self,document_id,name,birth):
+        name=self._checked_patient(name,birth)
         epoch = self._diagnostic_epoch()
         with self.lock(),self.connect() as db:
             self.backup(db)
@@ -729,7 +773,7 @@ class Workspace:
                 pass
         raise ValueError('Укажите дату в формате ДД.ММ.ГГГГ.')
 
-    def _reviewed_observations(self, parsed, observations, previous_date):
+    def _reviewed_observations(self, parsed, observations, previous_date, checked_ids=None):
         from .parsing import numeric_value
         previous = {item['result_id']: item for item in parsed['observations']}
         if observations is None:
@@ -767,14 +811,33 @@ class Workspace:
                 if not re.fullmatch(r'[1-9]\d*', str(page)) or int(page) > max(parsed.get('page_numbers') or [1]):
                     raise ValueError('Укажите страницу в пределах исходного документа.')
                 item['page'] = int(page)
-                item['line'] = 0
+                item['line'] = int(edit.get('line') or 0)
+                item['raw'] = str(edit.get('raw') or '')
+                if edit.get('page_index'):
+                    item['page_index'] = int(edit['page_index'])
             if 'comment' in edit and item['comment'] != previous.get(result_id, {}).get('comment'):
                 item['review_comment'] = item['comment']
             item.setdefault('line', 0)
             item['result_id'] = result_id or 'R-'+uuid.uuid4().hex[:20]
-            item['status'] = 'Проверено'
+            # A row nobody was asked about stays as extracted: «Проверено» promises a person looked.
+            if checked_ids is None or not result_id or result_id in checked_ids:
+                item['status'] = 'Проверено'
+            elif item.get('status') == 'Проверить':
+                item['status'] = 'Извлечено'
             checked.append(item)
         return checked
+
+    @staticmethod
+    def _resolve_table_lines(parsed, lines):
+        """Close unread lines the reviewer entered as rows or marked as not being results."""
+        for page, page_index, line in lines:
+            prefix = f'Страница {page}, строка {line}:'
+            parsed['problems'] = [problem for problem in parsed.get('problems', []) if not problem.startswith(prefix)]
+            if 'table_issues' in parsed:
+                matching = [issue for issue in parsed['table_issues']
+                            if issue['line'] == line and issue.get('page_index') == page_index]
+                parsed['table_issues'] = [issue for issue in parsed['table_issues'] if issue not in matching]
+                parsed.setdefault('resolved_table_issues', []).extend(matching)
 
     def _reviewed_sections(self, parsed, edits):
         previous = parsed['sections']
@@ -802,7 +865,8 @@ class Workspace:
         return checked
 
     def confirm_quality(self, document_id, *, date=None, study_type=None, observations=None, sections=None,
-                        note='', expected_revision=None):
+                        note='', expected_revision=None, checked_ids=None, resolved_lines=(),
+                        defer_export=False, skip_backup=False):
         note = note.strip()
         if not note:
             raise ValueError('Укажите результат сверки с оригиналом.')
@@ -812,14 +876,16 @@ class Workspace:
             parsed = self._with_result_ids(document_id, self._load_analysis(record))
             if parsed.get('duplicate_of') or not quality.needs_review(parsed):
                 raise ValueError('Сверка уже завершена. Обновите список документов.')
-            self._preflight_workbook()
+            if not defer_export:
+                self._preflight_workbook()
             previous_date = parsed['date']
             if date is not None:
                 parsed['date'] = self._review_date(date)
             if study_type is not None:
                 parsed['type'] = study_type.strip() or 'Документ'
-            parsed['observations'] = self._reviewed_observations(parsed, observations, previous_date)
+            parsed['observations'] = self._reviewed_observations(parsed, observations, previous_date, checked_ids)
             parsed['sections'] = self._reviewed_sections(parsed, sections)
+            self._resolve_table_lines(parsed, resolved_lines)
             findings = quality.assess(parsed, json.loads(record['extracted']))['issues']
             incomplete = [issue for issue in findings if issue['code'] in {
                 'unknown_type', 'missing_date', 'lab_no_results', 'missing_narrative_result',
@@ -828,8 +894,8 @@ class Workspace:
                 'PDF_TEXT_UNREADABLE', 'EMBEDDED_IMAGE_UNREADABLE', 'EMBEDDED_IMAGE_UNSUPPORTED',
             }]
             incomplete.extend(issue for issue in findings if (
-                (issue['code'] == 'conflicting_date' and date is None)
-                or (issue['code'] in {'conflicting_type','type_mismatch'} and study_type is None)
+                (issue['code'] == 'conflicting_date' and parsed['date'] is None)
+                or (issue['code'] in {'conflicting_type','type_mismatch'} and parsed['type'] in ('Документ', '', None))
             ))
             if incomplete and note == 'Сверены все страницы и строки оригинала':
                 raise ValueError('Укажите, как устранены замечания или почему данные остаются неполными.')
@@ -839,7 +905,8 @@ class Workspace:
                     parsed['observations'][index]['status'] = 'Сверено · неполные данные'
             parsed['quality'].update(confirmed=True, protected=True, confirmed_at=now(), note=note,
                                      incomplete=bool(incomplete), accepted_missing=incomplete)
-            self.backup(db)
+            if not skip_backup:
+                self.backup(db)
             with self._diagnostic_stage('review', epoch=epoch),db:
                 self._save_study_history(db, record, 'quality_confirmed', note)
                 db.execute('UPDATE documents SET analysis=? WHERE id=?',
@@ -849,6 +916,13 @@ class Workspace:
                 self.event(db, 'quality_confirmed', document_id)
             self._diagnostic('review_outcomes', 'confirmed_incomplete' if incomplete else 'confirmed', epoch=epoch)
             self._diagnostic_review_changes(record, parsed, epoch=epoch)
+            if defer_export:
+                return {**self.summary(db), 'revision': self._revision(db)}
+            return self._finish_review_change(db)
+
+    def finish_review_session(self):
+        """Rebuild the workbook once after a run of deferred confirmations."""
+        with self.lock(), self.connect() as db:
             return self._finish_review_change(db)
 
     def mark_duplicate(self, document_id, target_id, note, expected_revision=None):
@@ -1006,6 +1080,80 @@ class Workspace:
                 self.event(db, 'reprocessed', document_id)
             self._diagnostic('review_outcomes', 'reprocessed', epoch=epoch)
             return self._finish_review_change(db)
+
+    @staticmethod
+    def _is_reviewed(parsed):
+        return bool(parsed['quality'].get('confirmed') or parsed['quality'].get('protected'))
+
+    @classmethod
+    def _can_reparse(cls, parsed):
+        return (not parsed.get('duplicate_of') and not cls._is_reviewed(parsed)
+                and parsed.get('version') != analysis.PARSER_VERSION
+                and parsed.get('reparse_kept') != analysis.PARSER_VERSION)
+
+    @staticmethod
+    def _laboratory_rows(parsed):
+        return sum(item.get('origin') == 'Лабораторный бланк' for item in parsed.get('observations', []))
+
+    def _reparsed(self, record, previous):
+        """Build the new reading of a stored text. None means the previous reading stays."""
+        try:
+            proposed = analysis.analyze(json.loads(record['extracted']), record['filename'])
+            parsed, _ = self._preserve_reprocess_fields(record['id'], previous, proposed)
+        except (KeyError, IndexError, TypeError, ValueError):
+            return None
+        # Fewer table rows than before would be a loss nobody asked for.
+        return None if self._laboratory_rows(parsed) < self._laboratory_rows(previous) else parsed
+
+    def reparse_unconfirmed(self):
+        """Apply the current rules to stored text of documents no person has confirmed.
+
+        Originals and OCR text are reused as they are. Everything happens in one
+        transaction after a backup, and the previous reading goes to the study history.
+        """
+        report = {'updated': 0, 'kept': 0, 'reviewed': 0, 'rows_before': 0, 'rows_after': 0}
+        epoch = self._diagnostic_epoch()
+        with self.lock(), self.connect() as db:
+            self._preflight_workbook()
+            self.backup(db)
+            with self._diagnostic_stage('review', epoch=epoch), db:
+                for record in db.execute('SELECT * FROM documents').fetchall():
+                    previous = self._load_analysis(record)
+                    if previous.get('duplicate_of'):
+                        continue
+                    if self._is_reviewed(previous):
+                        report['reviewed'] += 1
+                        continue
+                    if not self._can_reparse(previous):
+                        continue
+                    self._with_result_ids(record['id'], previous)
+                    parsed = self._reparsed(record, previous)
+                    if parsed is None:
+                        previous['reparse_kept'] = analysis.PARSER_VERSION
+                        db.execute('UPDATE documents SET analysis=? WHERE id=?',
+                                   (json.dumps(previous, ensure_ascii=False), record['id']))
+                        report['kept'] += 1
+                        continue
+                    if previous.get('reprocess_identity_changed'):
+                        parsed['reprocess_identity_changed'] = True
+                    if not record['decision'] and record['patient_id']:
+                        owner = db.execute('SELECT name,birth FROM patients WHERE id=?', (record['patient_id'],)).fetchone()
+                        if parsed['names'] != [owner['name']] or parsed['births'] != [owner['birth']]:
+                            parsed['reprocess_identity_changed'] = True
+                    self._save_study_history(db, record, 'reparsed', 'Пересчёт по новым правилам разбора')
+                    db.execute('UPDATE documents SET analysis=? WHERE id=?',
+                               (json.dumps(parsed, ensure_ascii=False), record['id']))
+                    report['updated'] += 1
+                    report['rows_before'] += self._laboratory_rows(previous)
+                    report['rows_after'] += self._laboratory_rows(parsed)
+                if report['updated'] or report['kept']:
+                    self.touch(db)
+                    self.resolve_patients(db)
+                    self.event(db, 'reparsed', json.dumps(report))
+            if report['updated']:
+                self._diagnostic('review_outcomes', 'reprocessed', report['updated'], epoch=epoch)
+            report['summary'] = self._finish_review_change(db)
+            return report
 
     def document_list(self):
         """Study list for selecting an original to reprocess."""

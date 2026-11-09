@@ -343,7 +343,9 @@ def extract(path):
         return docx_pages(path)
     if path.suffix.lower() == '.txt':
         raw = path.read_bytes()
-        for encoding in ['utf-8-sig', 'utf-16', 'cp1251']:
+        # Without a byte order mark almost any even-length bytes decode as UTF-16.
+        encodings = ['utf-16'] if raw[:2] in (b'\xff\xfe', b'\xfe\xff') else ['utf-8-sig', 'cp1251']
+        for encoding in encodings:
             try:
                 return new_result('TXT', [raw.decode(encoding)])
             except UnicodeError:

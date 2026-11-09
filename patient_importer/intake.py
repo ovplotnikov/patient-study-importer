@@ -27,8 +27,10 @@ def collect(paths, workspace):
             if (path/'База'/'registry.sqlite').exists():
                 raise ValueError('Это рабочая папка программы. Откройте её через «Папка данных», чтобы не импортировать архив повторно.')
             candidates=[]
+            # Service names mean something only inside the program's own folder.
+            reserved=MANAGED if path==workspace.root or workspace.root in path.parents else frozenset()
             for parent,dirs,names in os.walk(path,followlinks=False):
-                dirs[:]=[d for d in dirs if not d.startswith('.') and d not in MANAGED and not (Path(parent)/d).is_symlink() and not (Path(parent)/d/'База'/'registry.sqlite').exists()]
+                dirs[:]=[d for d in dirs if not d.startswith('.') and d not in reserved and not (Path(parent)/d).is_symlink() and not (Path(parent)/d/'База'/'registry.sqlite').exists()]
                 candidates.extend(Path(parent)/name for name in sorted(names))
         else:candidates=[path]
         for candidate in candidates:
@@ -36,6 +38,23 @@ def collect(paths, workspace):
             candidate=candidate.resolve()
             if candidate not in seen:
                 seen.add(candidate);yield candidate
+
+
+def documents_in_folder(path, limit=1000):
+    """Count documents an import would move out of a folder that is not yet a workspace."""
+    root=Path(path).expanduser()
+    if (root/'База'/'registry.sqlite').exists():return 0
+    count=0
+    for parent,dirs,names in os.walk(root,followlinks=False):
+        dirs[:]=[d for d in dirs if not d.startswith('.') and not (Path(parent)/d).is_symlink()]
+        for name in names:
+            item=Path(parent)/name
+            if name.startswith(('.','~$')) or item.is_symlink() or item.parent.name=='Входящие':continue
+            try:known=supported(item)
+            except OSError:known=True
+            count+=known
+            if count>=limit:return count
+    return count
 
 
 def stage_files(workspace, paths, progress=lambda name:None, cancel=None):

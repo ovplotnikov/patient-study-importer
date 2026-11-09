@@ -14,7 +14,11 @@ from openpyxl import Workbook,load_workbook
 from openpyxl.styles import Alignment,Font,PatternFill
 from openpyxl.worksheet.table import Table,TableStyleInfo
 
-from . import quality
+from . import clinical_sheets,quality
+
+CLINICAL_META_ROW = 10
+NOTES_ARCHIVE = 'Архив заметок'
+CLINICAL_TABLE_BASE = 100
 
 HEADERS={
  'Пациенты':['PatientID','ФИО','Дата рождения','Документов'],
@@ -38,6 +42,7 @@ def safe(value):
 
 def rows_for(workspace,db):
     rows={name:[] for name in HEADERS}
+    studies=[]
     patients={r['id']:dict(r) for r in db.execute('SELECT * FROM patients')}
     documents=db.execute('SELECT * FROM documents ORDER BY created,id').fetchall()
     parsed_documents = [(document, workspace._load_analysis(document)) for document in documents]
@@ -81,6 +86,9 @@ def rows_for(workspace,db):
                     detail = f"Страница {issue['page']}. {detail}"
                 rows['Проверка'].append([stable_id(sid,'quality',issue['id']),sid,document['filename'],'Проверить данные',detail])
         rows['Исследования'].append([sid,pid,name,a['date'],a['type'],status,len(observations),reason,document['filename']])
+        if not duplicate_of:
+            studies.append({'id':sid,'patient_id':pid,'name':name,'birth':patients[pid]['birth'] if pid else '','date':a['date'],
+                            'kind':a['type'],'status':status,'filename':document['filename'],'observations':observations,'sections':sections})
         for index,item in enumerate(observations):
             result_id=item.get('result_id') or stable_id(sid,item['page'],item['line'],index)
             item_status = 'Черновик · сверить' if not pid or outstanding else item['status']
@@ -106,23 +114,27 @@ def rows_for(workspace,db):
             rows['Источники'].append([str(arrival['id']),sid,arrival['hash'],Path(arrival['source']).name,archive_path,original_path,arrival['category'],arrival['created']])
     for row in db.execute("SELECT * FROM arrivals WHERE category='Ошибки' OR error!=''"):
         rows['Проверка'].append([stable_id('arrival',row['id']),row['document_id'],Path(row['source']).name,'Ошибка файла',row['error']])
+    rows['studies']=studies
     return rows
 
 
-def write_sheet(book,name,headers,rows,index):
+def write_sheet(book,name,headers,rows,index,*,table_number=None,date_headers=(),owned=(),freeze=None,narrow=False):
     custom_headers=['Заметки'];custom_values={}
     if name in book:
         previous=book[name]
         old_headers=[cell.value for cell in previous[1]]
-        custom_headers=[str(h) for h in old_headers if h and h not in headers]
+        # Columns the program wrote earlier are not the user's, even if they are gone now.
+        custom_headers=[str(h) for h in old_headers if h and h not in headers and h not in owned]
         if 'Заметки' not in custom_headers:custom_headers.append('Заметки')
         positions={h:old_headers.index(h) for h in custom_headers if h in old_headers}
         for values in previous.iter_rows(min_row=2,values_only=True):
             if values and values[0]:custom_values[str(values[0])]={h:values[i] for h,i in positions.items()}
         book.remove(previous)
     sheet=book.create_sheet(name,index)
-    sheet.append(headers+custom_headers)
-    date_columns=[i for i,h in enumerate(headers) if h in {'Дата рождения','Дата документа','Дата показателя'}]
+    sheet.append([safe(header) for header in headers+custom_headers])
+    # A column named from a form's text must not become a formula.
+    for cell in sheet[1]:cell.data_type='s'
+    date_columns=[i for i,h in enumerate(headers) if h in {'Дата рождения','Дата документа','Дата показателя'} or h in date_headers]
     for row_no,row in enumerate(rows,2):
         clean=[safe(value) for value in row]
         for column in date_columns:
@@ -132,7 +144,7 @@ def write_sheet(book,name,headers,rows,index):
         # Imported text must not become executable spreadsheet formulas.
         for column,value in enumerate(row,1):
             if isinstance(value,str) and column-1 not in date_columns:sheet.cell(row_no,column).data_type='s'
-    sheet.freeze_panes='D2' if name=='Показатели' else 'B2'
+    sheet.freeze_panes=freeze or ('D2' if name=='Показатели' else 'B2')
     sheet.sheet_view.showGridLines=False
     header_font = Font(name='Calibri', size=11, color='FFFFFF', bold=True)
     header_fill = PatternFill('solid', fgColor='244C65')
@@ -147,6 +159,7 @@ def write_sheet(book,name,headers,rows,index):
         if header in {'ФИО','Пациент','Файл','Исходное имя'}:width=38
         if header in {'Подробности','Исходный фрагмент','Полный текст','Текст','Основание сопоставления','Архивный путь','Сохранённый оригинал'}:width=85
         if header in {'Показатель','Раздел','Референс','Заметки'}:width=38
+        if narrow and header not in {'Пациент','Файл','Заметки','Заключение'} and not header.endswith('Заключение'):width=14
         sheet.column_dimensions[sheet.cell(1,column).column_letter].width=width
     plain_alignment = Alignment(vertical='top', wrap_text=False)
     wrapped_alignment = Alignment(vertical='top', wrap_text=True)
@@ -159,7 +172,7 @@ def write_sheet(book,name,headers,rows,index):
     id_font = Font(name='Calibri', size=10, color='5F6C76')
     for cells in sheet.iter_rows(min_row=2,min_col=1,max_col=1):cells[0].font = id_font
     if rows:
-        table=Table(displayName='ImportTable'+str(index),ref=sheet.dimensions)
+        table=Table(displayName='ImportTable'+str(table_number or index),ref=sheet.dimensions)
         table.tableStyleInfo=TableStyleInfo(name='TableStyleMedium2',showRowStripes=True)
         sheet.add_table(table)
     if name=='Источники':
@@ -210,6 +223,89 @@ def archive_removed_rows(book, sheet_name, current_rows, archive_label, metadata
                 target.number_format = source.number_format
 
 
+def owned_clinical_sheets(book):
+    """What the program wrote on earlier runs: {usual name: {'title': sheet, 'headers': [...]}}."""
+    if '_Программа' not in book:
+        return {}
+    owned = {}
+    for key, value in book['_Программа'].iter_rows(min_row=CLINICAL_META_ROW, max_col=2, values_only=True):
+        if isinstance(key, str) and key.startswith('clinical:') and value:
+            owned[key.removeprefix('clinical:')] = json.loads(value)
+    return owned
+
+
+def free_title(book, name):
+    """Excel compares sheet names without regard to case."""
+    taken = {title.lower() for title in book.sheetnames}
+    if name.lower() not in taken:
+        return name
+    title, number = f'{name} (авто)'[:31], 2
+    while title.lower() in taken:
+        title, number = f'{name} (авто {number})'[:31], number+1
+    return title
+
+
+def archive_clinical_notes(book, title, new_rows, program_headers):
+    """Keep what a doctor wrote on a row that no longer exists, for example after a change of kind."""
+    if title not in book:
+        return
+    sheet = book[title]
+    headers = [cell.value for cell in sheet[1]]
+    current = {row[0] for row in new_rows}
+    notes = []
+    for row in sheet.iter_rows(min_row=2, values_only=True):
+        if row[0] in current:
+            continue
+        for header, value in zip(headers, row):
+            if header and header not in program_headers and value is not None:
+                notes.append([datetime.now(), title, row[1], row[3] if len(row) > 3 else None, str(header), str(value)])
+    if notes:
+        archive = book[NOTES_ARCHIVE] if NOTES_ARCHIVE in book else book.create_sheet(NOTES_ARCHIVE)
+        if archive.max_row == 1 and archive['A1'].value is None:
+            archive.append(['В архиве с', 'Лист', 'Пациент', 'Дата', 'Столбец', 'Запись'])
+        for note in notes:
+            archive.append([safe(value) for value in note])
+            for cell in archive[archive.max_row][1:]:
+                if isinstance(cell.value, str):
+                    cell.data_type = 's'
+
+
+def write_clinical_sheets(book, studies):
+    """Write the doctor-facing sheets and return how many sit in front of the technical ones."""
+    owned = owned_clinical_sheets(book)
+    built = clinical_sheets.build(studies)
+    written = {}
+    position = 1
+    for name, (headers, rows, dates) in built.items():
+        previous = owned.get(name, {})
+        title = previous.get('title')
+        if title is None or title not in book:
+            # A sheet with this name was made by the user and stays theirs.
+            title = free_title(book, name)
+        archive_clinical_notes(book, title, rows, previous.get('headers', ()))
+        freeze = 'E2' if name not in {'Свод', 'Динамика'} else ('D2' if name == 'Свод' else 'E2')
+        # The table name follows the kind, because a sheet's position shifts when a new kind appears.
+        write_sheet(book, title, headers, rows, position, table_number=CLINICAL_TABLE_BASE+clinical_sheets.SHEET_ORDER.index(name), date_headers=dates,
+                    owned=previous.get('headers', ()), freeze=freeze, narrow=True)
+        book[title].column_dimensions['A'].hidden = True
+        written[name] = {'title': title, 'headers': headers}
+        position += 1
+    # A kind with no studies left keeps its sheet only if the user wrote there.
+    for name, previous in owned.items():
+        if name in written or previous['title'] not in book:
+            continue
+        if has_user_content(book[previous['title']], previous['headers']):
+            written[name] = previous
+        else:
+            book.remove(book[previous['title']])
+    return written
+
+
+def has_user_content(sheet, program_headers):
+    user_columns = [cell.column for cell in sheet[1] if cell.value and cell.value not in program_headers]
+    return any(sheet.cell(row, column).value is not None for row in range(2, sheet.max_row+1) for column in user_columns)
+
+
 def export_workbook(workspace,db):
     target=workspace.root/'Исследования.xlsx'
     if target.with_name('~$'+target.name).exists():raise RuntimeError('Закройте Excel с таблицей «Исследования» и нажмите «Обработать» ещё раз. Данные уже сохранены.')
@@ -247,6 +343,7 @@ def export_workbook(workspace,db):
     summary.append([])
     summary.append(['Новые файлы','Добавьте в «Входящие» и нажмите «Обработать».'])
     summary.append(['Уточнения','Откройте «Проверить документы» в программе. Строки со статусом «Черновик · сверить» требуют проверки по оригиналу.'])
+    summary.append(['Свод и листы анализов','Каждая строка листа анализа — одно исследование. Анализы разных лет — разные строки, это не дубли. «Свод» показывает последние результаты пациента, «Динамика» — значения по годам. Документы без подтверждённого пациента сюда не попадают.'])
     summary.append(['Ручные записи','Колонка «Заметки», дополнительные колонки и отдельные листы сохраняются при обновлении.'])
     summary.append(['Измерения из описаний','Сохраняются вместе с датой, стороной и исходным контекстом. Отметка «Проверить» означает необходимость сверки.'])
     summary.column_dimensions['A'].width=33;summary.column_dimensions['B'].width=95
@@ -255,7 +352,8 @@ def export_workbook(workspace,db):
     for row in summary:
         for cell in row:cell.alignment = summary_alignment
         summary.row_dimensions[row[0].row].height=32
-    for index,(name,headers) in enumerate(HEADERS.items(),1):write_sheet(book,name,headers,data[name],index)
+    clinical=write_clinical_sheets(book,data['studies'])
+    for index,(name,headers) in enumerate(HEADERS.items(),1):write_sheet(book,name,headers,data[name],index+len(clinical),table_number=index)
     meta=book['_Программа'] if '_Программа' in book else book.create_sheet('_Программа')
     history = db.execute('SELECT id,document_id,created,action,note FROM study_history ORDER BY id').fetchall()
     if history:
@@ -264,11 +362,16 @@ def export_workbook(workspace,db):
             journal = book.create_sheet('Сверки').title
             meta['A6'], meta['B6'] = 'review_journal', journal
         actions = {'quality_confirmed': 'Данные сверены', 'duplicate_confirmed': 'Дубль подтверждён',
-                   'reprocessed': 'Повторная обработка'}
-        rows = [[str(row['id']), row['document_id'], row['created'], actions[row['action']], row['note']] for row in history]
-        write_sheet(book, journal, ['ReviewID','StudyID','Время (UTC)','Действие','Решение'], rows, len(HEADERS)+1)
+                   'reprocessed': 'Повторная обработка', 'reparsed': 'Пересчёт по новым правилам', 'patient_changed': 'Смена пациента'}
+        rows = [[str(row['id']), row['document_id'], row['created'], actions.get(row['action'],row['action']), row['note']] for row in history]
+        write_sheet(book, journal, ['ReviewID','StudyID','Время (UTC)','Действие','Решение'], rows, len(HEADERS)+1+len(clinical), table_number=len(HEADERS)+1)
     meta['A1']='workspace';meta['B1']=workspace_id;meta['A2']='revision';meta['B2']=db.execute("SELECT value FROM meta WHERE key='revision'").fetchone()[0]
     meta['A4']='quality_comments'
+    for row in meta.iter_rows(min_row=CLINICAL_META_ROW,max_col=2):
+        for cell in row:cell.value=None
+    for offset,(name,entry) in enumerate(clinical.items()):
+        meta.cell(CLINICAL_META_ROW+offset,1,'clinical:'+name)
+        meta.cell(CLINICAL_META_ROW+offset,2,json.dumps(entry,ensure_ascii=False)).data_type='s'
     meta.sheet_state='veryHidden'
     fd,temporary=tempfile.mkstemp(suffix='.xlsx',prefix='.import-',dir=workspace.root);os.close(fd)
     try:

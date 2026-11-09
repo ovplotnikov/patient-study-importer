@@ -7,13 +7,14 @@ import re
 import unicodedata
 
 from .parsing import (
-    COMPARATOR, POWER, RANGE, SCALAR, classify_pages, document_date,
+    COMPARATOR, LABORATORY_TYPES, POWER, RANGE, SCALAR, classify_pages, document_date,
     document_dates, identity, iso_date, laboratory_header, laboratory_rows,
-    normalized, numeric_value,
+    normalized, numeric_value, spaced,
 )
-from .quality import assess
+from .quality import REVIEWED_PARSER_VERSION, assess
 
-PARSER_VERSION='2.3.0'
+# Changing this offers existing unconfirmed documents a recalculation.
+PARSER_VERSION=REVIEWED_PARSER_VERSION
 SECTIONS=re.compile(r'^(Жалобы|Анамнез(?: заболевания| жизни)?|Объективный статус|Объективно|Диагноз[^:]*|Клинический диагноз|Заключение[^:]*|Рекомендации[^:]*|Лечение|Назначения|Проведенные обследования|Результаты[^:]*|Описание[^:]*|Осмотр)\s*:',re.I)
 NUMBER = rf'(?:{COMPARATOR}\s*)?{SCALAR}(?:{POWER}|{RANGE})'
 NUMBER_START = r'(?<![\w.,<>≤≥+−–^×·⋅-])'
@@ -30,36 +31,69 @@ def content_fingerprint(pages):
     return hashlib.sha256(text.encode()).hexdigest() if text else None
 
 
+SIDE = re.compile(r'\b(?:с?прав|с?лев)(?:ая|ый|ой|ую|ом|ое|а|о)\b|\bRD\b|\bRS\b', re.I)
+KIDNEY_METRICS = frozenset({'Паренхима', 'Лоханка', 'Чашечки', 'Мочеточник', 'Размеры почки'})
+METRIC_LABELS = (
+    ('Паренхима', r'\bпаренхим|\bпар\b'), ('Лоханка', r'\bлохан|\bчлс\b'), ('Чашечки', r'\bчашеч'),
+    ('Мочеточник', r'\bмочеточник'), ('Остаточная моча', r'\bостаточ|после мочеиспуск'),
+    ('Объём', r'\bоб[ъь][её]м(?!н)'), ('Креатинин', r'\bкреатинин'), ('Мочевина', r'\bмочевин'),
+    ('Гемоглобин', r'\bгемоглоб|\bHb\b'), ('Белок', r'\bбел(?:ок|ка)\b'), ('Рост', r'\bрост\b'),
+    ('Масса', r'\bмасса\b|\bвес\b|\bМ='), ('Стенка', r'\bстенк'), ('Клиренс', r'\bклиренс'),
+    ('Накопление препарата', r'\bнакоплен'), ('Перфузия', r'\buptake\b|\bперфуз'),
+)
+# A dot ends a clause after a full word. Shorter words before a dot are abbreviations («толщ.»).
+CLAUSE_END = re.compile(r'(?:(?<=[А-Яа-яЁёA-Za-z]{5})\.|[!?;])\s*(?=\S)|,\s+')
+COMPARISON = re.compile(r'сравнен|предыдущ|прошл|ранее', re.I)
+UNNAMED_METRIC = 'Измерение из описания'
+SPACED_SECTIONS = tuple(
+    (name, re.compile(spaced(name) + (r'(?![а-яё])' if name.startswith(('Жалобы', 'Анамнез')) else r'\s*:'), re.I))
+    for name in ('Жалобы', 'Анамнез заболевания', 'Анамнез жизни', 'Анамнез', 'Объективный статус',
+                 'Диагноз', 'Заключение', 'Рекомендации', 'Лечение', 'Назначения')
+)
+
+
 def side_from(text):
-    matches=list(re.finditer(r'прав(?:ая|ой|ую|а|о)|лев(?:ая|ой|ую|а|о)|\bRD\b|\bRS\b',text,re.I))
+    matches = list(SIDE.finditer(text))
     if not matches:
         return ''
-    token=matches[-1][0].lower()
-    return 'Правая' if token.startswith('прав') or token=='rd' else 'Левая'
+    token = matches[-1][0].lower()
+    return 'Правая' if 'прав' in token or token == 'rd' else 'Левая'
+
+
+def current_clause(text):
+    return CLAUSE_END.split(text)[-1]
 
 
 def metric_from(text, default):
-    labels=[('Паренхима',r'паренхим|\bпар\b'),('Лоханка',r'лохан|члс'),('Чашечки',r'чашеч'),
-            ('Мочеточник',r'мочеточник'),('Остаточная моча',r'остаточ|после мочеиспуск'),
-            ('Объём',r'объем|объём'),('Креатинин',r'креатинин'),('Мочевина',r'мочевин'),
-            ('Гемоглобин',r'гемоглоб|\bHb\b'),('Белок',r'белок|белка'),('Рост',r'рост'),('Масса',r'масса|\bвес\b|\bМ='),
-            ('Стенка',r'стенк'),('Клиренс',r'клиренс'),('Накопление препарата',r'накоплен'),('Перфузия',r'uptake|перфуз')]
-    candidates=[]
-    for label,pattern in labels:
-        hits=list(re.finditer(pattern,text,re.I))
+    """Name a value only from whole words in its own clause, never from a passing mention."""
+    clause = current_clause(text)
+    candidates = []
+    for label, pattern in METRIC_LABELS:
+        hits = list(re.finditer(pattern, clause, re.I))
         # A label followed by an earlier value must not label the next unknown metric.
-        if hits and not re.search(r'\d',text[hits[-1].end():]):candidates.append((hits[-1].start(),label))
+        if hits and not re.search(r'\d', clause[hits[-1].end():]):
+            candidates.append((hits[-1].start(), label))
     return max(candidates)[1] if candidates else default
 
 
-def narrative(pages, day, ocr_pages):
+def section_name(clean):
+    marker = SECTIONS.match(clean)
+    if marker:
+        return marker[1]
+    return next((name for name, pattern in SPACED_SECTIONS if pattern.match(clean)), None)
+
+
+def narrative(pages, day, ocr_pages, kind, table_pages=frozenset()):
+    # An unnamed number in a known prose report stays in its text. On a lab or unknown
+    # form it may be a table row that was not read, so it goes to review.
+    keep_unnamed=kind in LABORATORY_TYPES or kind=='Документ'
     values=[];sections=[]
     for page_no,page in enumerate(pages,1):
         # Laboratory fields are already extracted by the layout parser.
         if any(laboratory_header(line) for line in page.splitlines()):
             continue
         page_day=document_date(page) or day
-        section='Описание исследования';context_date=page_day;date_source='Дата документа';context=''
+        section='Описание исследования';section_date=page_day;section_source='Дата документа';context='';anchor=None
         lines=page.splitlines();section_lines=[];section_start=1
         def flush():
             text='\n'.join(section_lines).strip()
@@ -67,19 +101,18 @@ def narrative(pages, day, ocr_pages):
         for index,line in enumerate(lines,1):
             clean=' '.join(line.split())
             if not clean:continue
-            marker=SECTIONS.match(clean)
-            if marker:
-                flush();section_lines=[];section_start=index;section=marker[1]
-                context='';context_date=page_day;date_source='Дата документа'
-                if re.search('анамнез',section,re.I):context_date=None;date_source='Дата в анамнезе не указана'
+            heading=section_name(clean)
+            if heading:
+                flush();section_lines=[];section_start=index;section=heading
+                context='';section_date=page_day;section_source='Дата документа';anchor=None
+                if re.search('анамнез',section,re.I):section_date=None;section_source='Дата в анамнезе не указана'
             section_lines.append(line)
-            if re.search(r'рекомендац|назначен|лечени',section,re.I):continue
+            if page_no in table_pages or re.search(r'рекомендац|назначен|лечени',section,re.I):continue
             if re.search(r'Дата рождения|(?:^|\s)Адрес|№|ОГРН|телефон|[+]7\s*\(',clean,re.I):continue
-            # Carry an explicit study date within a contiguous paragraph, never a DOB.
-            dates=list(DATE_PATTERN.finditer(clean))
-            if dates:
-                value=iso_date(dates[0][1])
-                if value:context_date=value;date_source='Дата в тексте'
+            # A date applies until its sentence ends, including lines the sentence wraps onto.
+            # A date of comparison belongs to the earlier study, never to these values.
+            dates=[match for match in DATE_PATTERN.finditer(clean) if iso_date(match[1]) and not COMPARISON.search(clean[:match.start()])]
+            line_day=iso_date(dates[0][1]) if dates else None
             historical=bool(re.search('анамнез',section,re.I))
             fragments=[]
             for match in DIMENSIONS.finditer(clean):
@@ -94,20 +127,37 @@ def narrative(pages, day, ocr_pages):
             for match in MEASUREMENT.finditer(clean):
                 if any(start<=match.start()<end for start,end in occupied):continue
                 before=clean[:match.start()]
-                metric=metric_from(context+' '+before,'Измерение из описания')
-                side=side_from(context+' '+before) if re.search('почк|паренхим|лохан|чашеч|мочеточник',context+' '+before,re.I) else ''
+                metric=metric_from(context+' '+before,UNNAMED_METRIC)
+                if metric==UNNAMED_METRIC and not keep_unnamed:continue
+                side=side_from(context+' '+before) if metric in KIDNEY_METRICS else ''
                 fragments.append((match.start(),match.end(),metric,match['value'].strip(),match['unit'],side))
             for start,end,metric,result,unit,side in sorted(fragments):
                 local_dates=[match for match in dates if match.end()<start]
-                local_day=iso_date(local_dates[-1][1]) if local_dates else context_date
-                status='Проверить' if page_no in ocr_pages or not local_day or metric=='Измерение из описания' else 'Извлечено'
+                local_day=iso_date(local_dates[-1][1]) if local_dates else line_day or anchor or section_date
+                # A number from the history with no date cannot be placed in time. It stays in the text.
+                if historical and not local_day:continue
+                date_source='Дата в тексте' if line_day or anchor else section_source
+                status='Проверить' if page_no in ocr_pages or not local_day or metric==UNNAMED_METRIC else 'Извлечено'
                 values.append({'page':page_no,'line':index,'section':section,'label':metric,'result':result,'number':numeric_value(result),
                                'unit':unit,'reference':'','raw':clean,'flag':'','comment':'','side':side,'date':local_day,
                                'date_source':date_source,'origin':'Анамнез' if historical else 'Описание',
                                'status':status,'from_ocr':page_no in ocr_pages})
             context=(context+' '+clean)[-200:]
+            anchor=None if re.search(r'[.!?;]$',clean) else (iso_date(dates[-1][1]) if dates else anchor)
         flush()
     return values,sections
+
+
+def pages_without_patient(pages, names):
+    """Pages that open their own study but name nobody, in a file that names a patient elsewhere."""
+    if len(pages) < 2 or not names:
+        return []
+    found = []
+    for number, page in enumerate(pages, 1):
+        starts_study = document_dates(page) or any(laboratory_header(line) for line in page.splitlines())
+        if starts_study and not identity([page])[0]:
+            found.append(number)
+    return found
 
 
 def analyze(extracted, filename):
@@ -130,10 +180,10 @@ def analyze(extracted, filename):
         from_ocr = row['page'] in ocr_pages
         row.update(
             side='', date=row_day, date_source='Дата страницы' if local and local != day else 'Дата документа',
-            origin='Лабораторный бланк', status='Проверить' if from_ocr else 'Извлечено',
+            origin='Лабораторный бланк', status='Проверить' if from_ocr or row.get('suspect_reference') else 'Извлечено',
             from_ocr=from_ocr,
         )
-    descriptive, sections = narrative(pages, day, ocr_pages)
+    descriptive, sections = narrative(pages, day, ocr_pages, kind, {row['page'] for row in laboratory})
     page_numbers = extracted.get('page_numbers', list(range(1, len(pages) + 1)))
     problems = []
     if not any(text.strip() for text in pages):
@@ -152,6 +202,7 @@ def analyze(extracted, filename):
         'type_candidates': type_candidates, 'observations': laboratory + descriptive,
         'sections': sections, 'problems': problems, 'table_issues': table_issues,
         'identity_from_ocr': names != native_names or births != native_births,
+        'pages_without_patient': pages_without_patient(pages, names),
         'pages': pages, 'ocr_pages': ocr_pages,
         'ocr_evidence': extracted.get('ocr_evidence', []),
         'ocr_alternatives': extracted.get('ocr_alternatives', []),
@@ -164,6 +215,7 @@ def analyze(extracted, filename):
 def resolve(analyses, known_patients):
     """Return exact identities or review candidates. Folder names never invent identity."""
     keys=set((patient['name'],patient['birth']) for patient in known_patients)
+    confirmed=set(keys)
     for item in analyses:
         a=item['analysis']
         if len(a['names'])==1 and len(a['births'])==1 and len(a['names'][0].split())==3 and not a['identity_from_ocr']:
@@ -185,6 +237,9 @@ def resolve(analyses, known_patients):
             options=compact[(a['names'][0].replace(' ',''),a['births'][0])]
             if len(options)==1:
                 key=next(iter(options));reason='ФИО и дата рождения совпадают'
+                # A new birth date for a known name is a typo as often as a namesake.
+                if key not in confirmed and len(by_name[key[0]])>1:
+                    key=None;reason='Такое ФИО уже есть с другой датой рождения. Сверьте оригинал'
         if a['identity_from_ocr']:
             reason='Подтвердите ФИО и дату рождения, распознанные со скана';key=None
         if not key:
