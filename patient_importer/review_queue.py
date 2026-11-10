@@ -166,3 +166,41 @@ def find_line(lines, raw, line=None, total=None):
         expected = (line - 1) / max(total - 1, 1)
         matches.sort(key=lambda index: abs(index / max(len(lines) - 1, 1) - expected))
     return lines[matches[0]]
+
+
+NAME_BASIS, BIRTH_BASIS, FOLDER_BASIS = 'ФИО', 'дата рождения', 'соседние документы'
+
+
+def patient_suggestion(record):
+    """The one patient a document points to, with the reason. None when a person has to look.
+
+    A document naming someone and giving a birth date reached review because something
+    conflicts, and identity read from a scan needs its own check.
+    """
+    names, births = record.get('names', []), record.get('births', [])
+    candidates = [tuple(candidate) for candidate in record.get('candidates', [])]
+    if record.get('identity_from_ocr') or record.get('reason', '').startswith('После повторного'):
+        return None
+    if len(names) > 1 or len(births) > 1 or (names and births):
+        return None
+    if names:
+        matching = [candidate for candidate in candidates if candidate[0] == names[0]]
+        basis = NAME_BASIS
+    elif births:
+        matching = [candidate for candidate in candidates if candidate[1] == births[0]]
+        basis = BIRTH_BASIS
+    else:
+        matching, basis = candidates, FOLDER_BASIS
+    return (matching[0], basis) if len(matching) == 1 else None
+
+
+def patient_groups(records):
+    """Group confident suggestions, so one decision can cover every document of a patient."""
+    groups = {}
+    for record in records:
+        suggestion = patient_suggestion(record)
+        if suggestion:
+            (name, birth), basis = suggestion
+            groups.setdefault((name, birth, basis), []).append(record['id'])
+    return [{'name': name, 'birth': birth, 'basis': basis, 'documents': documents}
+            for (name, birth, basis), documents in sorted(groups.items())]

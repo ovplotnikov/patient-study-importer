@@ -574,7 +574,7 @@ class Workspace:
             for row in db.execute('SELECT * FROM documents WHERE patient_id IS NULL ORDER BY created'):
                 a=self._load_analysis(row)
                 if a.get('duplicate_of'):continue
-                result.append({'id':row['id'],'filename':row['filename'],'reason':row['reason'],'names':a['names'],'births':a['births'],'candidates':json.loads(row['candidates'])})
+                result.append({'id':row['id'],'filename':row['filename'],'reason':row['reason'],'names':a['names'],'births':a['births'],'candidates':json.loads(row['candidates']),'identity_from_ocr':bool(a.get('identity_from_ocr'))})
             return result
 
     def document(self,document_id):
@@ -636,6 +636,14 @@ class Workspace:
             self._diagnostic('edit_categories','identity',epoch=epoch)
             return self._finish_review_change(db)
 
+    def _assign_record(self,db,record,name,birth,reason):
+        existing=db.execute('SELECT id FROM patients WHERE name=? AND birth=?',(name,birth)).fetchone()
+        patient_id=existing['id'] if existing else 'P-'+uuid.uuid4().hex[:12]
+        db.execute('INSERT OR IGNORE INTO patients VALUES (?,?,?)',(patient_id,name,birth))
+        db.execute('UPDATE documents SET patient_id=?,decision=?,reason=? WHERE id=?',(patient_id,now(),reason,record['id']))
+        self._schedule_category(db, record['id'], self._category({'patient_id': patient_id}, self._load_analysis(record)))
+        self.touch(db);self.event(db,'patient_confirmed',record['id'])
+
     def assign(self,document_id,name,birth):
         name=self._checked_patient(name,birth)
         epoch = self._diagnostic_epoch()
@@ -644,18 +652,29 @@ class Workspace:
             record=db.execute('SELECT * FROM documents WHERE id=?',(document_id,)).fetchone()
             if not record:raise ValueError('Документ не найден')
             if record['patient_id']:raise ValueError('Пациент уже подтверждён. Обновите список документов.')
-            with db:
-                existing=db.execute('SELECT id FROM patients WHERE name=? AND birth=?',(name,birth)).fetchone()
-                patient_id=existing['id'] if existing else 'P-'+uuid.uuid4().hex[:12]
-                db.execute('INSERT OR IGNORE INTO patients VALUES (?,?,?)',(patient_id,name,birth))
-                db.execute('UPDATE documents SET patient_id=?,decision=?,reason=? WHERE id=?',(patient_id,now(),'Пациент подтверждён пользователем',document_id))
-                self._schedule_category(db, document_id, self._category({'patient_id': patient_id}, self._load_analysis(record)))
-                self.touch(db);self.event(db,'patient_confirmed',document_id)
+            with db:self._assign_record(db,record,name,birth,'Пациент подтверждён пользователем')
             self._diagnostic('edit_categories', 'identity', epoch=epoch)
             self._export_workbook(db)
             self.finish_moves(db,lambda **kw:None)
             self.backup(db)
         return self.summary()
+
+    def assign_many(self,assignments):
+        """Confirm many documents at once: one backup, one transaction and one rebuild of the table."""
+        checked=[(document_id,self._checked_patient(name,birth),birth) for document_id,name,birth in assignments]
+        epoch = self._diagnostic_epoch()
+        assigned=0
+        with self.lock(),self.connect() as db:
+            self._preflight_workbook()
+            self.backup(db)
+            with db:
+                for document_id,name,birth in checked:
+                    record=db.execute('SELECT * FROM documents WHERE id=?',(document_id,)).fetchone()
+                    if record and not record['patient_id']:
+                        self._assign_record(db,record,name,birth,'Пациент подтверждён пользователем списком')
+                        assigned+=1
+            if assigned:self._diagnostic('edit_categories','identity',assigned,epoch=epoch)
+            return {**self._finish_review_change(db),'assigned':assigned}
 
     @staticmethod
     def _revision(db):
