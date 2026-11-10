@@ -156,7 +156,7 @@ def worker(mode, directory, count, batch_count, repeats):
             return [status(documents[ident], needs_review) for ident in ids]
 
     summary, counters = measure(workspace.summary, repeats,
-                                lambda result: {key: value for key, value in result.items() if key != 'workbook'})
+                                lambda result: {key: value for key, value in result.items() if key not in ('workbook', 'reparse')})
     batch, statuses = measure(batch_statuses, repeats, lambda result: result)
     if (counters['documents'] != count or counters['quality_review'] != (count + 9) // 10
             or statuses.count('quality_review') != (len(ids) + 9) // 10
