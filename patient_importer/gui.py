@@ -12,8 +12,8 @@ import tkinter as tk
 from tkinter import filedialog,messagebox,ttk
 import traceback
 from .pdf_render import PDFIUM_LOCK
-from .storage import Workspace
-from . import __version__,updater,intake,ui,diagnostics_config
+from .storage import ReviewCommittedError,Workspace
+from . import __version__,review_queue,updater,intake,ui,diagnostics_config
 from .telemetry import Diagnostics
 
 
@@ -175,7 +175,13 @@ class Application:
     def choose(self):
         if self.workspace_busy() or self.workspace_window_open():return
         selected=filedialog.askdirectory(title='Рабочая папка с базой и таблицей',initialdir=self.folder_var.get(),parent=self.root)
-        if selected:self.select(selected)
+        if not selected:return
+        found=intake.documents_in_folder(selected)
+        if found and not messagebox.askyesno('Переместить документы?',
+                f'В этой папке есть документы: {found}. При обработке программа перенесёт их в свои папки внутри выбранной.\n\n'
+                'Лучше выбрать пустую папку, а документы добавить кнопкой. Всё равно использовать эту папку?',
+                default='no',icon='warning',parent=self.root):return
+        self.select(selected)
 
     def row(self,name,subtitle,icon=None,action=None,action_text=None):
         row=ttk.Frame(self.content.body,padding=(4,8));row.pack(fill='x')
@@ -241,7 +247,7 @@ class Application:
         summary=self.refresh(None if rescan else self.list_summary)
         self.documents_page,visible=self.visible_list_page(self.paths,self.documents_page)
         attention=bool(summary['total_review'] or summary['errors'] or summary['pending_moves'] or summary.get('pending_export'))
-        rendered=(tuple(visible),attention,summary['total_review'],summary['errors'])
+        rendered=(tuple(visible),attention,summary['total_review'],summary['errors'],summary.get('reparse',0))
         if rendered==self.rendered_queue:return
         self.content.clear()
         self.rendered_queue=rendered
@@ -252,8 +258,39 @@ class Application:
             ttk.Label(empty,text='Выберите файлы или целую папку',style='Muted.TLabel').pack()
         for path in visible:
             self.row(path.name,path.suffix.upper().lstrip('.') or 'Документ',action=lambda p=path:self.remove_file(p))
+        self.reparse_row(summary)
         if attention:
             self.row('Требуют внимания',f"Проверить документы: {summary['total_review']} · Ошибки: {summary['errors']}",self.icons.get('exclamation-triangle','amber',32),self.show_result,'Посмотреть')
+
+    def reparse_row(self,summary):
+        if summary.get('reparse'):
+            self.row('Программа стала лучше читать бланки',f"Можно обновить документы: {summary['reparse']} · Подтверждённые вручную не изменятся",
+                     self.icons.get('exclamation-triangle','amber',32),self.reparse,'Обновить')
+
+    def reparse(self):
+        if not self.workspace or self.workspace_busy() or self.workspace_window_open():return
+        count=self.workspace.summary().get('reparse',0)
+        if not count:return
+        if not messagebox.askyesno('Обновить разбор',
+                f'Пересчитать документы по новым правилам: {count}?\n\nОригиналы и документы, подтверждённые вручную, не изменятся. '
+                'Перед пересчётом будет сделана резервная копия, прежний результат останется в истории. '
+                'Закройте таблицу в Excel.',parent=self.root):return
+
+        def completed(report,error):
+            self.current.set('')
+            if isinstance(error,ReviewCommittedError):messagebox.showwarning('Документы обновлены',str(error),parent=self.root)
+            elif error is not None:messagebox.showerror('Не удалось обновить разбор',str(error),parent=self.root)
+            else:
+                lines=[f"Обновлено документов: {report['updated']}",f"Строк в лабораторных таблицах: было {report['rows_before']}, стало {report['rows_after']}"]
+                if report['kept']:lines.append(f"Оставлено без изменений: {report['kept']}. Новый разбор нашёл в них меньше строк")
+                if report['reviewed']:lines.append(f"Подтверждённые вручную не изменялись: {report['reviewed']}")
+                messagebox.showinfo('Разбор обновлён','\n'.join(lines),parent=self.root)
+            self.rendered_queue=None
+            if self.screen=='documents':self.show_documents(rescan=False)
+            else:self.refresh()
+
+        if self.workspace_actions.run(self.workspace.reparse_unconfirmed,completed):
+            self.current.set('Обновляем разбор документов и таблицу…')
 
     def add_files(self):
         if self.workspace_busy() or self.workspace_window_open():return
@@ -330,6 +367,7 @@ class Application:
         else:
             self.new_button.pack(side='right');self.excel_button.configure(style='Primary.TButton',image=self.icons.get('table','white'))
         self.excel_button.configure(state='normal' if Path(summary['workbook']).exists() and not summary.get('pending_export') else 'disabled')
+        self.reparse_row(summary)
         if summary['review']:self.row('Уточните пациента',f"Документов: {summary['review']}",self.icons.get('exclamation-triangle','amber',32),self.review,'Проверить')
         if summary['quality_review']:self.row('Сверьте данные с оригиналом',f"Документов: {summary['quality_review']} · Показатели пока не подтверждены",self.icons.get('exclamation-triangle','amber',32),self.review,'Проверить')
         if summary.get('incomplete'):self.row('Сверено с замечаниями',f"Документов: {summary['incomplete']} · Причины сохранены в таблице",self.icons.get('exclamation-triangle','amber',32),self.history,'Посмотреть')
@@ -550,9 +588,11 @@ class ReviewWindow:
         self.window.geometry(f'{min(1240,parent.winfo_screenwidth()-50)}x{min(850,parent.winfo_screenheight()-130)}+25+25')
         self.window.minsize(850,620);self.window.transient(parent);self.window.grab_set()
         self.window.protocol('WM_DELETE_WINDOW',self.close)
+        self.window.bind('<Return>',lambda event:self.confirm())
         self.window.bind('<Destroy>',self.destroy_preview,add='+')
         outer=ttk.Frame(self.window,padding=22);outer.pack(fill='both',expand=True)
         self.title=ttk.Label(outer,text='Кому принадлежит документ?',style='Heading.TLabel');self.title.pack(anchor='w',pady=(0,12))
+        self.bulk_button=ttk.Button(outer,text='',style='Primary.TButton',command=self.open_bulk)
         self.window.bind('<Configure>',lambda e:self.title.configure(wraplength=max(500,e.width-44)) if e.widget is self.window else None)
         self.list_frame=ttk.Frame(outer);list_frame=self.list_frame;list_frame.pack(fill='x')
         self.list=ttk.Treeview(list_frame,columns=('file','reason'),show='headings',height=3,selectmode='browse')
@@ -633,6 +673,12 @@ class ReviewWindow:
         self.selected=None;self.name.set('');self.birth.set('');self.validation.set('')
         self.confirm_button.configure(state='disabled');self.original_button.configure(state='disabled')
         self.records={row['id']:row for row in self.workspace.review_list()}
+        self.groups=review_queue.patient_groups(self.records.values())
+        count=sum(len(group['documents']) for group in self.groups)
+        self.bulk_button.pack_forget()
+        if count>1:
+            self.bulk_button.configure(text=f'Подтвердить найденных пациентов списком · документов: {count}')
+            self.bulk_button.pack(anchor='w',before=self.list_frame,pady=(0,12))
         self.list.configure(height=min(2,max(1,len(self.records))))
         for item in self.list.get_children():self.list.delete(item)
         for record in self.records.values():self.list.insert('','end',iid=record['id'],values=(record['filename'],ui.reason_text(record)))
@@ -643,7 +689,29 @@ class ReviewWindow:
             if self.on_next and (summary if summary is not None else self.workspace.summary())['quality_review']:
                 self.success_message.configure(text='Теперь сверьте результаты исследований с оригиналами')
                 self.next_button.configure(text='Проверить данные',command=self.next_review)
-            self.list_frame.pack_forget();self.panes.pack_forget();self.title.pack_forget();self.success.pack(fill='both',expand=True)
+            self.list_frame.pack_forget();self.panes.pack_forget();self.title.pack_forget();self.bulk_button.pack_forget();self.success.pack(fill='both',expand=True)
+
+    def open_bulk(self):
+        if self.saving or not self.groups:return
+        self.bulk_dialog=BulkPatientDialog(self.window,self.groups,self.save_bulk)
+
+    def save_bulk(self,assignments,dialog):
+        workspace=self.workspace
+
+        def completed(summary,error):
+            self.set_saving(False)
+            dialog.close()
+            if isinstance(error,ReviewCommittedError):
+                messagebox.showwarning('Пациенты подтверждены',str(error),parent=self.window)
+            elif error is not None:
+                messagebox.showerror('Не удалось подтвердить',str(error),parent=self.window)
+            self.on_change()
+            self.fill(summary if error is None else None)
+
+        if self.actions.run(lambda:workspace.assign_many(assignments),completed):
+            self.set_saving(True)
+            return True
+        return False
 
     def next_review(self):
         if self.saving:return
@@ -658,8 +726,12 @@ class ReviewWindow:
         if selection[0]==self.selected:return
         self.selected=selection[0];record=self.records[self.selected]
         document=self.workspace.document(self.selected);analysis=json.loads(document['analysis'])
-        self.name.set(analysis['names'][0] if len(analysis['names'])==1 else '')
-        self.birth.set(datetime.strptime(analysis['births'][0],'%Y-%m-%d').strftime('%d.%m.%Y') if len(analysis['births'])==1 else '')
+        suggestion=review_queue.patient_suggestion(record)
+        found=suggestion[0] if suggestion else (None,None)
+        name=analysis['names'][0] if len(analysis['names'])==1 else found[0]
+        birth=analysis['births'][0] if len(analysis['births'])==1 else found[1]
+        self.name.set(name or '')
+        self.birth.set(datetime.strptime(birth,'%Y-%m-%d').strftime('%d.%m.%Y') if birth else '')
         self.validation.set('');self.confirm_button.configure(state='normal');self.original_button.configure(state='normal')
         for child in self.candidate_area.winfo_children():child.destroy()
         self.candidate_buttons=[]
@@ -783,6 +855,52 @@ class ReviewWindow:
         birth_iso=birth.isoformat()
         if self.actions.run(lambda:workspace.assign(document_id,name,birth_iso),self.complete_confirmation):
             self.set_saving(True)
+
+
+class BulkPatientDialog:
+    """One decision for every document of a patient. Weak suggestions start unselected."""
+
+    def __init__(self,parent,groups,on_save):
+        self.groups=groups;self.on_save=on_save
+        self.window=tk.Toplevel(parent);self.window.title('Подтвердить пациентов списком');self.window.configure(bg='white')
+        self.window.geometry('860x520');self.window.minsize(640,380);self.window.transient(parent);self.window.grab_set()
+        self.window.protocol('WM_DELETE_WINDOW',self.close)
+        outer=ttk.Frame(self.window,padding=20);outer.pack(fill='both',expand=True)
+        ttk.Label(outer,text='Подтвердите пациентов, найденных в документах',style='Heading.TLabel').pack(anchor='w')
+        ttk.Label(outer,text='Выделенные строки будут подтверждены. Документы без ФИО и даты рождения предложены по соседним документам папки: выделите их, только если уверены.',style='Muted.TLabel',wraplength=800).pack(anchor='w',pady=(6,12))
+        buttons=ttk.Frame(outer);buttons.pack(side='bottom',fill='x',pady=(12,0))
+        self.save_button=ttk.Button(buttons,text='',style='Primary.TButton',command=self.save);self.save_button.pack(side='right')
+        ttk.Button(buttons,text='Отмена',command=self.close).pack(side='left')
+        area=ttk.Frame(outer);area.pack(fill='both',expand=True)
+        self.list=ttk.Treeview(area,columns=('name','birth','count','basis'),show='headings',selectmode='extended')
+        for key,title,width in [('name','Пациент',380),('birth','Дата рождения',120),('count','Документов',90),('basis','Найдено по',190)]:
+            self.list.heading(key,text=title);self.list.column(key,width=width,stretch=key=='name')
+        scroll=ttk.Scrollbar(area,orient='vertical',command=self.list.yview);self.list.configure(yscrollcommand=scroll.set)
+        scroll.pack(side='right',fill='y');self.list.pack(side='left',fill='both',expand=True)
+        strong=[]
+        for index,group in enumerate(groups):
+            day=datetime.strptime(group['birth'],'%Y-%m-%d').strftime('%d.%m.%Y')
+            self.list.insert('','end',iid=str(index),values=(group['name'],day,len(group['documents']),group['basis']))
+            if group['basis']!=review_queue.FOLDER_BASIS:strong.append(str(index))
+        self.list.bind('<<TreeviewSelect>>',self.update_button)
+        self.list.selection_set(strong)
+        self.update_button()
+
+    def chosen(self):
+        return [self.groups[int(item)] for item in self.list.selection()]
+
+    def update_button(self,event=None):
+        count=sum(len(group['documents']) for group in self.chosen())
+        self.save_button.configure(text=f'Подтвердить · документов: {count}',state='normal' if count else 'disabled')
+
+    def save(self):
+        assignments=[(document,group['name'],group['birth']) for group in self.chosen() for document in group['documents']]
+        if assignments and self.on_save(assignments,self):
+            self.save_button.configure(state='disabled',text='Сохраняем…')
+
+    def close(self):
+        if self.window.winfo_exists():
+            parent=self.window.master;self.window.destroy();parent.grab_set()
 
 
 class ProblemsWindow:

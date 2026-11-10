@@ -101,7 +101,7 @@ class StorageRegressionTests(unittest.TestCase):
         target.touch()
         self.assertEqual(self.workspace.summary(), {
             'pending_export': False, 'documents': 3, 'patients': 1, 'review': 1,
-            'quality_review': 1, 'total_review': 1, 'incomplete': 1, 'duplicates': 1,
+            'quality_review': 1, 'total_review': 1, 'incomplete': 1, 'reparse': 0, 'duplicates': 1,
             'errors': 0, 'pending_moves': 1, 'workbook': str(target),
         })
         self.assertTrue(self.workspace.has_serious_review_issue())

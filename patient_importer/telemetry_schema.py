@@ -20,7 +20,7 @@ METRICS = MappingProxyType({
         'extraction_issue', 'OCR_USED', 'OCR_DISAGREEMENT', 'OCR_ENGINE_UNAVAILABLE',
         'OCR_LOW_CONFIDENCE', 'OCR_EMPTY', 'OCR_FAILED', 'PDF_TEXT_UNREADABLE', 'PDF_PAGE_EMPTY',
         'EMBEDDED_IMAGE_UNREADABLE', 'EMBEDDED_IMAGE_UNSUPPORTED', 'SIGNATURE_IMAGE',
-        'DOCX_COMPLEX_CONTENT', 'DOCX_EXTRA_TEXT',
+        'DOCX_COMPLEX_CONTENT', 'DOCX_EXTRA_TEXT', 'page_without_patient',
     }),
     'review_outcomes': frozenset({'confirmed', 'confirmed_incomplete', 'reprocessed', 'excluded', 'deferred'}),
     'edit_categories': frozenset({

@@ -26,7 +26,7 @@
 Полный список кодов `review_reasons`.
 
 - Пациент и версия разбора — `missing_identity`, `ambiguous_identity`, `identity_from_ocr`, `legacy_parser`.
-- Вид, дата и строки — `type_mismatch`, `conflicting_type`, `unknown_type`, `conflicting_date`, `missing_date`, `lab_no_results`, `missing_narrative_result`, `ambiguous_value`, `missing_result`, `missing_unit`, `unknown_unit`, `unmapped_columns`, `unparsed_row`.
+- Вид, дата и строки — `type_mismatch`, `conflicting_type`, `unknown_type`, `conflicting_date`, `missing_date`, `lab_no_results`, `missing_narrative_result`, `ambiguous_value`, `missing_result`, `missing_unit`, `unknown_unit`, `unmapped_columns`, `page_without_patient`, `unparsed_row`.
 - OCR — `ocr_value`, `ocr_text`, `OCR_USED`, `OCR_DISAGREEMENT`, `OCR_ENGINE_UNAVAILABLE`, `OCR_LOW_CONFIDENCE`, `OCR_EMPTY`, `OCR_FAILED`.
 - Чтение документа — `extraction_issue`, `PDF_TEXT_UNREADABLE`, `PDF_PAGE_EMPTY`, `EMBEDDED_IMAGE_UNREADABLE`, `EMBEDDED_IMAGE_UNSUPPORTED`, `SIGNATURE_IMAGE`, `DOCX_COMPLEX_CONTENT`, `DOCX_EXTRA_TEXT`.
 
@@ -67,6 +67,6 @@
 
 Код Apps Script не записывает запросы в журналы. В манифесте отключено журналирование необработанных исключений. Google как оператор платформы может обрабатывать сетевые метаданные, включая IP-адрес, и вести служебные журналы. Эти записи находятся вне таблицы и не контролируются приложением. [Настройки манифеста](https://developers.google.com/apps-script/manifest#fields), [механизмы журналирования Google](https://developers.google.com/apps-script/guides/logging).
 
-Начиная с версии 2.4.0 в конфигурации указан проверенный HTTPS-адрес развёртывания Google Apps Script. Приёмник поддерживает версии 2.4.0 и 2.4.1. Сбор на каждом компьютере начинается после явного согласия. [Проверка развёртывания на вымышленных данных](TELEMETRY_VERIFICATION.md).
+Начиная с версии 2.4.0 в конфигурации указан проверенный HTTPS-адрес развёртывания Google Apps Script. Приёмник поддерживает версии 2.4.0, 2.4.1 и 2.5.0. Сбор на каждом компьютере начинается после явного согласия. [Проверка развёртывания на вымышленных данных](TELEMETRY_VERIFICATION.md).
 
 Согласие на диагностику касается только счётчиков. Материалы для поддержки бланков пользователь готовит и отправляет отдельно. [Правила обращения с данными](PRIVACY.md).

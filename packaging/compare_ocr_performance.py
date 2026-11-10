@@ -175,17 +175,19 @@ def run_checkout(checkout, vendor, executable, fixtures):
 
 
 def differences(baseline, current):
+    """OCR output must match the baseline. Parsing rules may change, but must stay repeatable."""
     mismatches = []
-    for key in ('extracted', 'analysis', 'quality'):
-        if baseline['cold'][key] != current['cold'][key]:
-            mismatches.append(f'cold/{key}')
+    if baseline['cold']['extracted'] != current['cold']['extracted']:
+        mismatches.append('cold/extracted')
     for name in CASES:
         if baseline['pages'][name] != current['pages'][name]:
             mismatches.append(f'{name}/Page')
-        for key in ('extracted', 'analysis', 'quality'):
-            runs = baseline['warm'][name] + current['warm'][name]
-            if len({run[key] for run in runs}) != 1:
-                mismatches.append(f'{name}/warm/{key}')
+        if len({run['extracted'] for run in baseline['warm'][name] + current['warm'][name]}) != 1:
+            mismatches.append(f'{name}/warm/extracted')
+        for label, result in (('baseline', baseline), ('current', current)):
+            for key in ('analysis', 'quality'):
+                if len({run[key] for run in result['warm'][name]}) != 1:
+                    mismatches.append(f'{name}/warm/{key}/{label}')
     return mismatches
 
 
@@ -222,7 +224,8 @@ def main():
               'cold_scope': 'First OCR in a fresh Python process, including model load. OS caches retained.',
               'memory_scope': 'Process peaks reported separately. No Tesseract child peak on Windows.',
               'baseline': baseline, 'current': current, 'warm_median_seconds': medians,
-              'full_result_parity': not mismatches, 'mismatches': mismatches}
+              'full_result_parity': not mismatches, 'mismatches': mismatches,
+              'parity_scope': 'OCR text and pages against the baseline. Analysis and quality only between repeats.'}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
     print(json.dumps({'full_result_parity': not mismatches, 'warm_median_seconds': medians}))

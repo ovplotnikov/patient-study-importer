@@ -85,7 +85,7 @@ class QualityTests(unittest.TestCase):
         result = parsed(IDENTITY + DATE + 'УЗИ\n'
                         'Креатинин −8,5 мкмоль/л.\nКреатинин +8,5 мкмоль/л.\n'
                         'Креатинин <=8,5 мкмоль/л.\nКреатинин 8,5e-3 мкмоль/л.\n'
-                        'Правая почка 1,2×10^3 мм.')
+                        'Паренхима 1,2×10^3 мм.')
         self.assertEqual(
             [(row['result'], row['number']) for row in result['observations']],
             [('−8,5', -8.5), ('+8,5', 8.5), ('<=8,5', None), ('8,5e-3', 0.0085), ('1,2×10^3', None)],
@@ -93,7 +93,7 @@ class QualityTests(unittest.TestCase):
         self.assertIn('ambiguous_value', codes(result))
 
     def test_longer_unit_does_not_fall_back_to_prefix(self):
-        result = parsed(IDENTITY + DATE + 'УЗИ\nУчебный показатель 12 мм/ч.')
+        result = parsed(IDENTITY + DATE + 'Учебный показатель 12 мм/ч.')
         self.assertEqual(result['observations'][0]['unit'], 'мм/ч')
 
     def test_units_and_metadata_do_not_count_as_lab_results(self):

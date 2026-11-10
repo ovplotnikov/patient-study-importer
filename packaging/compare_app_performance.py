@@ -60,16 +60,34 @@ def study(index):
     return lab_page(patient_name(index // 5), LABELS, index)
 
 
+# The sheets and analysis fields that existed in the baseline. Parity guards the data users
+# already had. Output a release adds on purpose, such as new sheets, is not part of it.
+BASELINE_SHEETS = ('Пациенты', 'Исследования', 'Показатели', 'Заключения', 'Проверка', 'Источники', 'Тексты', CUSTOM_SHEET)
+BASELINE_ANALYSIS_FIELDS = ('names', 'births', 'cards', 'date', 'date_candidates', 'page_numbers', 'type',
+                            'type_candidates', 'observations', 'sections', 'problems', 'table_issues')
+ADDED_OBSERVATION_FIELDS = ('suspect_reference',)
+
+
 def workbook_fingerprint(path):
-    # Archive member timestamps are immaterial. openpyxl also writes a fresh
-    # modification timestamp into docProps/core.xml on each save.
+    from openpyxl import load_workbook
+
     digest = hashlib.sha256()
-    with ZipFile(path) as archive:
-        for name in sorted(archive.namelist()):
-            if name != 'docProps/core.xml':
-                digest.update(name.encode('utf-8') + b'\0')
-                digest.update(hashlib.sha256(archive.read(name)).digest())
+    book = load_workbook(path, read_only=True)
+    try:
+        for name in BASELINE_SHEETS:
+            digest.update(name.encode('utf-8') + b'\0')
+            for row in book[name].iter_rows(values_only=True):
+                digest.update(repr(row).encode('utf-8'))
+    finally:
+        book.close()
     return digest.hexdigest()
+
+
+def baseline_view(result):
+    view = {key: result.get(key) for key in BASELINE_ANALYSIS_FIELDS}
+    view['observations'] = [{key: value for key, value in row.items() if key not in ADDED_OBSERVATION_FIELDS}
+                            for row in result['observations']]
+    return view
 
 
 def check_import(result, count, duplicates):
@@ -212,7 +230,8 @@ def measure_analysis(analysis, kind, count):
     start = perf_counter()
     result = function(*args)
     elapsed = perf_counter() - start
-    serialized = json.dumps(result, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    view = baseline_view(result) if kind == 'analysis' else result
+    serialized = json.dumps(view, sort_keys=True, separators=(',', ':')).encode('utf-8')
     if kind == 'analysis':
         observations = result['observations']
         require(len(observations) == count and all(row['date'] == '2025-03-02' for row in observations),

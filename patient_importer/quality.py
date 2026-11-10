@@ -5,10 +5,10 @@ import re
 
 from .parsing import COMPARATOR, KNOWN_UNIT, LABORATORY_TYPES, RANGE, SCALAR, classify_pages, classify_study, document_dates
 
-REVIEWED_PARSER_VERSION = '2.3.0'
+REVIEWED_PARSER_VERSION = '2.5.0'
 UNITLESS_LABEL = re.compile(
     r'^(?:ph|рн|inr|мно|цветовой показатель|относительная плотность|удельный вес)(?:\b|$)|'
-    r'\b(?:коэффициент|индекс|отношение)\b',
+    r'\b(?:коэффициент|индекс|отношение|ph|уд[ае]льн\w+ вес\w*|относительн\w+ плотност\w*)\b',
     re.I,
 )
 MEASURED_LABEL = re.compile(
@@ -19,6 +19,13 @@ MEASURED_LABEL = re.compile(
 )
 NUMERIC_RESULT = re.compile(rf'^(?:{COMPARATOR}\s*)?{SCALAR}(?:{RANGE}|(?:\s*[хx×*]\s*{SCALAR})+)$')
 MISSING_VALUES = {'', '-', '—', '–', 'н/д', 'н.д.'}
+PRINTED_DASHES = {'-', '—', '–'}
+SEMI_QUANTITATIVE = re.compile(r'(?:\d\s*)?\+{1,4}')
+URINE_FORMS = frozenset({'ОАМ', 'Нечипоренко'})
+# Urine forms print sediment counts with no unit. There is nothing on the form to compare it with.
+SEDIMENT_LABEL = re.compile(r'лейкоцит|эритроцит|эпители|цилиндр', re.I)
+# Bookkeeping about how a page was read. It says nothing about the extracted values.
+INFORMATIONAL_ISSUES = frozenset({'SIGNATURE_IMAGE'})
 
 
 def has_narrative_result(sections):
@@ -101,6 +108,12 @@ def assess(analysis, extracted=None):
             add('missing_narrative_result', 'Не удалось найти описание или заключение исследования.')
 
     page_numbers = analysis.get('page_numbers') or list(range(1, len(pages) + 1))
+    for index in analysis.get('pages_without_patient', []):
+        add('page_without_patient', 'На странице своё исследование, но нет ФИО. Проверьте, что это тот же пациент.',
+            page=page_numbers[index - 1], page_index=index)
+    ocr_indexes = set(analysis.get('ocr_pages', []))
+    has_native_text = {page_numbers[i] for i, text in enumerate(pages) if text.strip() and i + 1 not in ocr_indexes}
+    ocr_read_text = any(1 <= i <= len(pages) and pages[i - 1].strip() for i in ocr_indexes)
     ocr_pages = {page_numbers[i - 1] for i in analysis.get('ocr_pages', []) if 1 <= i <= len(page_numbers)}
     found_ocr_value = False
     for index, item in enumerate(observations):
@@ -117,17 +130,20 @@ def assess(analysis, extracted=None):
             add('ocr_value', f'Сверьте с оригиналом результат «{label}» со скана.', **position)
         elif item.get('status') == 'Проверить':
             add('ambiguous_value', f'Сверьте с оригиналом результат «{label}».', **position)
-        if value.lower() in MISSING_VALUES:
+        if value in PRINTED_DASHES and item.get('origin') == 'Лабораторный бланк':
+            pass  # The table cell is carried over exactly as printed.
+        elif value.lower() in MISSING_VALUES:
             add('missing_result', f'Не найден результат «{label}».', **position)
         elif NUMERIC_RESULT.fullmatch(value):
             if re.fullmatch(SCALAR, value) and item.get('number') is None:
                 add('ambiguous_value', f'Проверьте запись числа «{label}».', **position)
             if unit.lower() in MISSING_VALUES:
-                if not UNITLESS_LABEL.search(label) and (item.get('unit_column') or MEASURED_LABEL.search(label)):
+                sediment = kind in URINE_FORMS and SEDIMENT_LABEL.search(label)
+                if not sediment and not UNITLESS_LABEL.search(label) and (item.get('unit_column') or MEASURED_LABEL.search(label)):
                     add('missing_unit', f'Не найдена единица измерения «{label}».', **position)
             elif not KNOWN_UNIT.fullmatch(unit):
                 add('unknown_unit', f'Проверьте единицу измерения «{label}».', **position)
-        elif re.match(r'^[<>≤≥+−-]?\s*\d', value):
+        elif re.match(r'^[<>≤≥+−-]?\s*\d', value) and not SEMI_QUANTITATIVE.fullmatch(value):
             add('ambiguous_value', f'Проверьте, какое значение относится к «{label}».', **position)
         if item.get('unmapped_columns'):
             add('unmapped_columns', 'Не удалось определить назначение некоторых столбцов.', **position)
@@ -151,6 +167,15 @@ def assess(analysis, extracted=None):
     extraction_issues = (extracted or {}).get('extraction_issues', analysis.get('extraction_issues', []))
     for entry in extraction_issues:
         if isinstance(entry, dict):
+            code = entry.get('code')
+            if code in INFORMATIONAL_ISSUES:
+                continue
+            # An image with no text beside a readable page is a logo or a stamp.
+            if code == 'OCR_EMPTY' and entry.get('page') in has_native_text:
+                continue
+            # Text that OCR read gets its own review item. Otherwise OCR repeated the text layer.
+            if code == 'OCR_USED' and not ocr_read_text:
+                continue
             add(entry.get('code') or 'extraction_issue',
                 entry.get('message') or 'Не удалось полностью прочитать источник.',
                 page=entry.get('page'), page_index=entry.get('page_index'), line=entry.get('line'))
