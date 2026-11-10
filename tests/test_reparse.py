@@ -65,7 +65,7 @@ class ReparseTests(unittest.TestCase):
         self.add()
         self.broken()
         self.workspace.reparse_unconfirmed()
-        book = load_workbook(self.workspace.root / 'Исследования.xlsx', read_only=True)
+        book = load_workbook(self.workspace.root / 'Исследования.xlsx')
         values = {cell for row in book['Показатели'].iter_rows(values_only=True) for cell in row}
         self.assertIn('Гемоглобин', values)
 

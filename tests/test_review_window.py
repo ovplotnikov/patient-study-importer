@@ -147,7 +147,7 @@ class WindowTests(unittest.TestCase):
             return [json.loads(row[0]) for row in db.execute('SELECT analysis FROM documents ORDER BY filename')]
 
     def workbook_values(self):
-        book = load_workbook(self.workspace.root / 'Исследования.xlsx', read_only=True)
+        book = load_workbook(self.workspace.root / 'Исследования.xlsx')
         return {str(cell) for row in book['Показатели'].iter_rows(values_only=True) for cell in row if cell is not None}
 
     def test_queue_opens_on_the_first_stumble_with_fields_filled(self):
