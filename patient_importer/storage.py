@@ -1,5 +1,5 @@
 """Transactional registry, incremental imports and recoverable file moves."""
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -13,7 +13,7 @@ import uuid
 
 import portalocker
 
-from . import analysis, extraction, quality
+from . import analysis, extraction, parallel, quality
 from .telemetry_schema import MAX_COUNT, METRICS
 
 KEEP_NEWEST_BACKUPS=20
@@ -185,6 +185,8 @@ class Workspace:
             epoch = self._diagnostic_epoch()
         try:
             yield
+        except parallel.Cancelled:
+            raise
         except Exception:
             self._diagnostic('failure_stages', stage, epoch=epoch)
             raise
@@ -1114,63 +1116,82 @@ class Workspace:
     def _laboratory_rows(parsed):
         return sum(item.get('origin') == 'Лабораторный бланк' for item in parsed.get('observations', []))
 
-    def _reparsed(self, record, previous):
-        """Build the new reading of a stored text. None means the previous reading stays."""
+    def _reparsed(self, record, previous, proposed):
+        """Merge a new reading with what a person decided. None means the previous reading stays."""
+        if proposed is None:
+            return None
         try:
-            proposed = analysis.analyze(json.loads(record['extracted']), record['filename'])
             parsed, _ = self._preserve_reprocess_fields(record['id'], previous, proposed)
         except (KeyError, IndexError, TypeError, ValueError):
             return None
         # Fewer table rows than before would be a loss nobody asked for.
         return None if self._laboratory_rows(parsed) < self._laboratory_rows(previous) else parsed
 
-    def reparse_unconfirmed(self):
+    def reparse_unconfirmed(self, progress=lambda **state: None, cancel=None, workers=None):
         """Apply the current rules to stored text of documents no person has confirmed.
 
-        Originals and OCR text are reused as they are. Everything happens in one
-        transaction after a backup, and the previous reading goes to the study history.
+        Originals and OCR text are reused as they are. Reading runs on several cores.
+        Everything is written in one transaction after a backup, so a stop or a failure
+        leaves every document as it was. The previous reading goes to the study history.
         """
         report = {'updated': 0, 'kept': 0, 'reviewed': 0, 'rows_before': 0, 'rows_after': 0}
         epoch = self._diagnostic_epoch()
         with self.lock(), self.connect() as db:
             self._preflight_workbook()
+            progress(phase='Резервная копия базы', current='')
             self.backup(db)
             with self._diagnostic_stage('review', epoch=epoch), db:
-                for record in db.execute('SELECT * FROM documents').fetchall():
-                    previous = self._load_analysis(record)
+                waiting = []
+                for row in db.execute('SELECT id, analysis FROM documents').fetchall():
+                    previous = self._load_analysis(row, db=db)
                     if previous.get('duplicate_of'):
                         continue
                     if self._is_reviewed(previous):
                         report['reviewed'] += 1
-                        continue
-                    if not self._can_reparse(previous):
-                        continue
-                    self._with_result_ids(record['id'], previous)
-                    parsed = self._reparsed(record, previous)
-                    if parsed is None:
-                        previous['reparse_kept'] = analysis.PARSER_VERSION
-                        db.execute('UPDATE documents SET analysis=? WHERE id=?',
-                                   (json.dumps(previous, ensure_ascii=False), record['id']))
-                        report['kept'] += 1
-                        continue
-                    if previous.get('reprocess_identity_changed'):
-                        parsed['reprocess_identity_changed'] = True
-                    if not record['decision'] and record['patient_id']:
-                        owner = db.execute('SELECT name,birth FROM patients WHERE id=?', (record['patient_id'],)).fetchone()
-                        if parsed['names'] != [owner['name']] or parsed['births'] != [owner['birth']]:
+                    elif self._can_reparse(previous):
+                        waiting.append(row['id'])
+                progress(phase='Обновляем разбор документов', total=len(waiting), done=0)
+
+                def jobs():
+                    for document_id in waiting:
+                        record = db.execute('SELECT * FROM documents WHERE id=?', (document_id,)).fetchone()
+                        yield record, (record['extracted'], record['filename'])
+
+                readings = parallel.ordered_map(analysis.analyze_stored, jobs(), total=len(waiting),
+                                                workers=workers, cancel=cancel)
+                # Closing stops the worker processes even when a write fails midway.
+                with closing(readings):
+                    for done, (record, proposed) in enumerate(readings, 1):
+                        previous = self._with_result_ids(record['id'], self._load_analysis(record))
+                        parsed = self._reparsed(record, previous, proposed)
+                        progress(done=done, current=record['filename'])
+                        if parsed is None:
+                            previous['reparse_kept'] = analysis.PARSER_VERSION
+                            db.execute('UPDATE documents SET analysis=? WHERE id=?',
+                                       (json.dumps(previous, ensure_ascii=False), record['id']))
+                            report['kept'] += 1
+                            continue
+                        if previous.get('reprocess_identity_changed'):
                             parsed['reprocess_identity_changed'] = True
-                    self._save_study_history(db, record, 'reparsed', 'Пересчёт по новым правилам разбора')
-                    db.execute('UPDATE documents SET analysis=? WHERE id=?',
-                               (json.dumps(parsed, ensure_ascii=False), record['id']))
-                    report['updated'] += 1
-                    report['rows_before'] += self._laboratory_rows(previous)
-                    report['rows_after'] += self._laboratory_rows(parsed)
+                        if not record['decision'] and record['patient_id']:
+                            owner = db.execute('SELECT name,birth FROM patients WHERE id=?', (record['patient_id'],)).fetchone()
+                            if parsed['names'] != [owner['name']] or parsed['births'] != [owner['birth']]:
+                                parsed['reprocess_identity_changed'] = True
+                        self._save_study_history(db, record, 'reparsed', 'Пересчёт по новым правилам разбора')
+                        db.execute('UPDATE documents SET analysis=? WHERE id=?',
+                                   (json.dumps(parsed, ensure_ascii=False), record['id']))
+                        report['updated'] += 1
+                        report['rows_before'] += self._laboratory_rows(previous)
+                        report['rows_after'] += self._laboratory_rows(parsed)
+                # Past this point the run finishes even if Stop is pressed.
                 if report['updated'] or report['kept']:
+                    progress(phase='Сопоставляем пациентов', current='', stoppable=False)
                     self.touch(db)
                     self.resolve_patients(db)
                     self.event(db, 'reparsed', json.dumps(report))
             if report['updated']:
                 self._diagnostic('review_outcomes', 'reprocessed', report['updated'], epoch=epoch)
+            progress(phase='Сохраняем таблицу Excel', current='', stoppable=False)
             report['summary'] = self._finish_review_change(db)
             return report
 

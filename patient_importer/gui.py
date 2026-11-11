@@ -1,5 +1,6 @@
 """Guided, local desktop workflow: documents -> processing -> results."""
 from datetime import datetime
+import functools
 import json
 import os
 from pathlib import Path
@@ -13,7 +14,7 @@ from tkinter import filedialog,messagebox,ttk
 import traceback
 from .pdf_render import PDFIUM_LOCK
 from .storage import ReviewCommittedError,Workspace
-from . import __version__,review_queue,updater,intake,ui,diagnostics_config
+from . import __version__,review_queue,updater,intake,parallel,ui,diagnostics_config
 from .telemetry import Diagnostics
 
 
@@ -41,7 +42,7 @@ class Application:
         self.root.minsize(850,620);ui.setup(self.root);self.icons=ui.Icons(self.root)
         self.events=queue.Queue();self.worker=None;self.cancel=threading.Event();self.closing=False
         self.updating=False;self.update_cancel=threading.Event();self.pending_update=None;self.update_prompt_active=False
-        self.working=False;self.screen='documents';self.batch=[];self.paths=[]
+        self.working=False;self.reparsing=False;self.screen='documents';self.batch=[];self.paths=[]
         self.workspace_actions=ui.WorkspaceActions(self.root,can_start=self.can_start_workspace_action,
                                                    can_present=lambda:not self.closing,
                                                    on_idle=self.after_workspace_action)
@@ -277,7 +278,14 @@ class Application:
                 'Закройте таблицу в Excel.',parent=self.root):return
 
         def completed(report,error):
-            self.current.set('')
+            self.reparsing=False;self.busy(False);self.stop_button.pack_forget()
+            if self.closing:return
+            self.rendered_queue=None
+            if self.screen=='documents':self.show_documents(rescan=False)
+            else:self.refresh()
+            if isinstance(error,parallel.Cancelled):
+                self.phase.set('Обновление остановлено. Документы не изменились.')
+                return
             if isinstance(error,ReviewCommittedError):messagebox.showwarning('Документы обновлены',str(error),parent=self.root)
             elif error is not None:messagebox.showerror('Не удалось обновить разбор',str(error),parent=self.root)
             else:
@@ -285,12 +293,26 @@ class Application:
                 if report['kept']:lines.append(f"Оставлено без изменений: {report['kept']}. Новый разбор нашёл в них меньше строк")
                 if report['reviewed']:lines.append(f"Подтверждённые вручную не изменялись: {report['reviewed']}")
                 messagebox.showinfo('Разбор обновлён','\n'.join(lines),parent=self.root)
-            self.rendered_queue=None
-            if self.screen=='documents':self.show_documents(rescan=False)
-            else:self.refresh()
 
-        if self.workspace_actions.run(self.workspace.reparse_unconfirmed,completed):
-            self.current.set('Обновляем разбор документов и таблицу…')
+        self.cancel.clear()
+        events=self.events
+        work=functools.partial(self.workspace.reparse_unconfirmed,
+                               progress=lambda **state:events.put(('progress',state)),cancel=self.cancel)
+        if self.workspace_actions.run(work,completed):self.show_reparse_progress(count)
+
+    def show_reparse_progress(self,count):
+        """The same progress view as processing, so a long run is visibly alive."""
+        self.reparsing=True;self.busy(True)
+        self.heading.configure(text='Обновляем разбор документов')
+        self.phase.set('Подготовка');self.current.set('')
+        self.content.clear();self.rendered_queue=None;self.drop.pack_forget();self.pagination.pack_forget()
+        for button in [self.start_button,self.review_button,self.new_button]:button.pack_forget()
+        self.stop_button.configure(text='Остановить');self.stop_button.pack(side='right')
+        self.progress.pack(fill='x',before=self.content,pady=(8,12))
+        self.progress['maximum']=max(1,count);self.progress['value']=0
+        self.current_label.pack(anchor='w',before=self.content,pady=(0,12))
+        ttk.Label(self.content.body,text='Можно остановить в любой момент до сохранения таблицы: документы останутся как были.',
+                  style='Muted.TLabel',wraplength=760).pack(anchor='w',pady=(4,0))
 
     def add_files(self):
         if self.workspace_busy() or self.workspace_window_open():return
@@ -405,7 +427,8 @@ class Application:
     def stop(self):
         if self.updating:
             self.update_cancel.set();self.phase.set('Отменяем загрузку обновления…');return
-        self.cancel.set();self.phase.set('Сохраним результат после текущего файла.');self.stop_button.config(state='disabled')
+        self.cancel.set();self.stop_button.config(state='disabled')
+        self.phase.set('Останавливаем. Документы не изменятся.' if self.reparsing else 'Сохраним результат после текущего файла.')
 
     def poll(self):
         try:
@@ -420,11 +443,14 @@ class Application:
                         message=f"Добавлено: {len(data['added'])}. Других форматов: {len(data['skipped'])}. Ошибок: {len(data['errors'])}."
                         if data['errors']:message+='\n\n'+'\n'.join(item['file']+': '+item['reason'] for item in data['errors'][:8])
                         messagebox.showwarning('Не все файлы добавлены',message,parent=self.root)
-                elif kind=='progress':
+                # A late report from a finished run must not overwrite its outcome.
+                elif kind=='progress' and self.working:
                     if 'phase' in data:self.phase.set(data['phase'])
                     if 'current' in data:self.current.set(data['current'])
                     if 'total' in data:self.progress['maximum']=max(1,data['total'])
                     if 'done' in data:self.progress['value']=data['done']
+                    if self.reparsing and 'done' in data:self.phase.set(f"Обновляем разбор документов · {data['done']} из {int(self.progress['maximum'])}")
+                    if data.get('stoppable') is False:self.stop_button.config(state='disabled')
                 elif kind=='finished':
                     self.batch=data.get('batch',[]);self.result_page=0;self.busy(False)
                     if self.closing:self.root.destroy();return
@@ -566,6 +592,7 @@ class Application:
     def close(self):
         if self.workspace_actions.active or self.workspace_actions.presenting:
             self.closing=True
+            if self.reparsing:self.cancel.set()
             self.phase.set('Закроем программу после завершения текущего действия…')
         elif self.updating:
             if messagebox.askyesno('Скачивается обновление','Отменить загрузку и закрыть программу?',parent=self.root):self.closing=True;self.update_cancel.set()

@@ -11,6 +11,7 @@ import shutil
 import tempfile
 
 from openpyxl import Workbook,load_workbook
+from openpyxl.styles.cell_style import StyleArray
 from openpyxl.styles import Alignment,Font,PatternFill
 from openpyxl.worksheet.table import Table,TableStyleInfo
 
@@ -161,11 +162,14 @@ def write_sheet(book,name,headers,rows,index,*,table_number=None,date_headers=()
         if header in {'Показатель','Раздел','Референс','Заметки'}:width=38
         if narrow and header not in {'Пациент','Файл','Заметки','Заключение'} and not header.endswith('Заключение'):width=14
         sheet.column_dimensions[sheet.cell(1,column).column_letter].width=width
-    plain_alignment = Alignment(vertical='top', wrap_text=False)
-    wrapped_alignment = Alignment(vertical='top', wrap_text=True)
+    # Setting a style object per cell hashes it every time. The workbook keeps one
+    # copy of each alignment, so the index is looked up once and shared.
+    plain_alignment = book._alignments.add(Alignment(vertical='top', wrap_text=False))
+    wrapped_alignment = book._alignments.add(Alignment(vertical='top', wrap_text=True))
     for row in sheet.iter_rows(min_row=2):
         for cell in row:
-            cell.alignment = wrapped_alignment if cell.column > 3 else plain_alignment
+            if cell._style is None:cell._style = StyleArray()
+            cell._style.alignmentId = wrapped_alignment if cell.column > 3 else plain_alignment
         sheet.row_dimensions[row[0].row].height=32
     for column in date_columns:
         for cells in sheet.iter_rows(min_row=2,min_col=column+1,max_col=column+1):cells[0].number_format='dd.mm.yyyy'

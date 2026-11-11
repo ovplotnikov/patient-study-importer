@@ -160,6 +160,18 @@ def pages_without_patient(pages, names):
     return found
 
 
+def analyze_stored(job):
+    """Read a stored extraction again. Runs in a worker process, so it takes and returns plain data.
+
+    None means the stored text cannot be read, and the previous reading stays.
+    """
+    extracted, filename = job
+    try:
+        return analyze(json.loads(extracted), filename)
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+
+
 def analyze(extracted, filename):
     pages = extracted['pages']
     ocr_pages = extracted['ocr_pages']

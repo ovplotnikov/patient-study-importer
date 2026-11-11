@@ -388,9 +388,32 @@ def run(root):
             old=json.loads(row['analysis']);old['version']='2.3.0';old['quality']={'issues':[],'confirmed':False}
             db.execute('UPDATE documents SET analysis=? WHERE id=?',(json.dumps(old,ensure_ascii=False),row['id']))
     app.refresh();settle();assert app.workspace.summary()['reparse']==1
+    # A long recalculation shows its progress and can be stopped without any change.
+    entered=threading.Event();release=threading.Event();original=app.workspace.reparse_unconfirmed
+    def held(*,progress,cancel,**kwargs):
+        progress(phase='Обновляем разбор документов',total=1,done=0);entered.set()
+        assert release.wait(15),'Recalculation test did not release the worker'
+        return original(progress=progress,cancel=cancel,**kwargs)
+    with patch.object(app.workspace,'reparse_unconfirmed',side_effect=held),patch.object(messagebox,'askyesno',return_value=True),\
+            patch.object(messagebox,'showinfo') as reported:
+        app.reparse()
+        try:
+            deadline=time.monotonic()+15
+            while not entered.is_set() or not app.events.empty():
+                settle();time.sleep(.02);assert time.monotonic()<deadline,'Recalculation did not start'
+            assert app.progress.winfo_ismapped() and app.current_label.winfo_ismapped()
+            visible(app.stop_button);assert 'из 1' in app.phase.get(),app.phase.get()
+            capture('11-reparse.png')
+            app.stop_button.invoke()
+        finally:release.set()
+        finish()
+    reported.assert_not_called();assert 'не изменились' in app.phase.get(),app.phase.get()
+    assert not app.progress.winfo_ismapped() and not app.stop_button.winfo_ismapped()
+    assert app.workspace.summary()['reparse']==1
     with patch.object(messagebox,'askyesno',return_value=True),patch.object(messagebox,'showinfo') as reported:
         app.reparse();finish()
     reported.assert_called_once();assert app.workspace.summary()['reparse']==0
+    assert not app.progress.winfo_ismapped() and not app.stop_button.winfo_ismapped()
     # Long queues retain their visible widgets across focus and expose every file.
     queue_root=root/'long-queue'
     incoming=queue_root/'Входящие';incoming.mkdir(parents=True)
