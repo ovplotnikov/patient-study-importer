@@ -61,7 +61,7 @@ def smoke_test(root):
     assert not (workspace.root/'Нужно уточнить'/'без ФИО.txt').exists()
     smoke_parallel()
     smoke_ocr(root)
-    return {'ok':True,'checks':['worker_processes','first_import','archive_move','byte_duplicate','incremental_patient','notes_preserved','custom_sheet_preserved','review_confirmation','separate_quality_confirmation','review_move','bundled_ocr','bundled_pdf_rendering','mixed_pdf_ocr'],'summary':workspace.summary()}
+    return {'ok':True,'checks':['worker_processes','worker_ocr','first_import','archive_move','byte_duplicate','incremental_patient','notes_preserved','custom_sheet_preserved','review_confirmation','separate_quality_confirmation','review_move','bundled_ocr','bundled_pdf_rendering','mixed_pdf_ocr'],'summary':workspace.summary()}
 
 
 def smoke_parallel():
@@ -105,8 +105,10 @@ def smoke_ocr(root):
         with patch('urllib.request.urlopen',side_effect=AssertionError('OCR must work offline')), \
              patch('requests.sessions.Session.request',side_effect=AssertionError('OCR must work offline')):
             return extract(path)
+    readings = {}
     for path in (image_path, pdf_path, mixed_path):
         data = offline_extract(path)
+        readings[path] = data
         recognized = ' '.join(' '.join(data['pages']).casefold().split())
         assert all(line.casefold() in recognized for line in text), (path.name, recognized)
         assert data['ocr_pages'], path.name
@@ -120,3 +122,10 @@ def smoke_ocr(root):
         if path == mixed_path:
             assert data['page_numbers'] == [1, 1], data['page_numbers']
             assert 'Synthetic cover text' in data['native_pages'][0], data['native_pages']
+    # Import reads files in worker processes. They must find the bundled engines
+    # and read a scan exactly like this process.
+    from . import parallel, reading
+    jobs = [(path, (str(path), path.name)) for path in readings]
+    for path, ahead in parallel.ordered_map(reading.read_original, jobs, total=len(jobs), workers=2, minimum=1):
+        assert 'extracted' in ahead, (path.name, ahead)
+        assert ahead['extracted'] == readings[path], path.name
