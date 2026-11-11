@@ -13,11 +13,13 @@ import uuid
 
 import portalocker
 
-from . import analysis, extraction, parallel, quality
+from . import analysis, extraction, parallel, quality, reading
 from .telemetry_schema import MAX_COUNT, METRICS
 
 KEEP_NEWEST_BACKUPS=20
 KEEP_DAILY_BACKUPS=14
+# Reading a scan loads the OCR engine, about 300 MB per process.
+IMPORT_MEMORY_PER_WORKER=400*1024*1024
 MANAGED={'Обработано','Нужно уточнить','Дубли','Ошибки','База','Резервные копии','Отложено'}
 # None is a captured absence of consent, not a request to capture it again.
 _CURRENT_EPOCH = object()
@@ -260,7 +262,9 @@ class Workspace:
             temporary.unlink(missing_ok=True)
         return target
 
-    def add_file(self,db,path,diagnostic_attempt=None):
+    def add_file(self,db,path,diagnostic_attempt=None,prepared=None):
+        """Store one file. `prepared` is a reading made ahead in a worker; it is used
+        only when the file still has the hash it was read with."""
         attempt = diagnostic_attempt if diagnostic_attempt is not None else {}
         attempt['stage'] = 'intake'
         digest=sha256(path)
@@ -278,15 +282,20 @@ class Workspace:
         if match:
             document_id=match['id']
         else:
-            original=self.preserve(path,digest)
+            ahead=prepared.get('reading') if prepared and prepared['digest']==digest else None
+            original=prepared['original'] if ahead else self.preserve(path,digest)
             attempt['stage'] = 'extraction'
-            extracted=extraction.extract(original)
+            if ahead is None:extracted=extraction.extract(original)
+            elif 'extraction_error' in ahead:raise reading.ReadingFailed(ahead['extraction_error'])
+            else:extracted=ahead['extracted']
             source_format = extracted.get('format')
             if type(source_format) is str and source_format in EXTRACTED_DIAGNOSTIC_FORMATS:
                 attempt['format'] = EXTRACTED_DIAGNOSTIC_FORMATS[source_format]
             if not any(page.strip() for page in extracted['pages']):raise ValueError('В файле не обнаружен читаемый текст')
             attempt['stage'] = 'analysis'
-            parsed=analysis.analyze(extracted,path.name)
+            if ahead is None:parsed=analysis.analyze(extracted,path.name)
+            elif 'analysis_error' in ahead:raise reading.ReadingFailed(ahead['analysis_error'])
+            else:parsed=ahead['parsed']
             attempt['stage'] = 'storage'
             fingerprint=analysis.content_fingerprint(extracted['pages'])
             matches = db.execute('SELECT * FROM documents WHERE fingerprint=? ORDER BY created,id', (fingerprint,)).fetchall() if fingerprint else []
@@ -433,32 +442,56 @@ class Workspace:
                 self._diagnostic('failure_stages', 'archive', epoch=epoch)
                 with db:db.execute('UPDATE arrivals SET error=? WHERE id=?',(str(exc),row['id']))
 
+    def _import_jobs(self,db,paths):
+        """Hash and preserve files in order, so workers read the same bytes this process stores.
+
+        A file already stored or one that fails here is left to add_file, which
+        repeats the step and reports any failure as before.
+        """
+        for path in paths:
+            # Diagnostics belong to the consent in force when work on a file began.
+            epoch=self._diagnostic_epoch()
+            try:
+                digest=sha256(path)
+                if db.execute('SELECT 1 FROM documents WHERE hash=?',(digest,)).fetchone():
+                    yield (path,None,epoch),None;continue
+                original=self.preserve(path,digest)
+            except Exception:
+                yield (path,None,epoch),None;continue
+            yield (path,{'digest':digest,'original':original},epoch),(str(original),path.name)
+
     def import_folder(self,progress=lambda **state:None,cancel=None):
         cancel=cancel or threading.Event()
         with self._diagnostic_batch() as attempts,self.lock(),self.connect() as db:
             with self._diagnostic_stage('storage'):
                 self.backup(db)
             paths,skipped=self.files();batch=[];progress(total=len(paths),done=0,phase='Чтение файлов',skipped=len(skipped))
-            for index,path in enumerate(paths,1):
-                if cancel.is_set():break
-                progress(done=index-1,current=path.name)
-                attempt = {'format': DIAGNOSTIC_FORMATS.get(path.suffix.lower(), 'other'),
-                           'stage': 'storage', 'outcome': 'error', 'epoch': self._diagnostic_epoch()}
-                attempts.append(attempt)
-                try:
-                    with db:
-                        result,document_id=self.add_file(db,path,attempt)
-                        self.event(db,'import',json.dumps({'source':str(path),'result':result,'document':document_id},ensure_ascii=False))
-                    batch.append({'file':path.name,'source':str(path),'status':result,'document_id':document_id})
-                except Exception as exc:
-                    self._diagnostic('failure_stages', attempt['stage'], epoch=attempt['epoch'])
-                    try:digest=sha256(path)
-                    except OSError:digest='unreadable-'+hashlib.sha256(str(path).encode()).hexdigest()
-                    with db:
-                        db.execute("INSERT INTO arrivals(source,hash,category,error,created) VALUES (?,?,?,?,?) ON CONFLICT(source,hash) DO UPDATE SET error=excluded.error,status='pending'",(str(path),digest,'Ошибки',str(exc),now()))
-                        self.touch(db)
-                    batch.append({'file':path.name,'source':str(path),'status':'Ошибка','reason':str(exc)})
-                progress(done=index)
+            readings=parallel.ordered_map(reading.read_original,self._import_jobs(db,paths),total=len(paths),
+                                          workers=parallel.worker_count(IMPORT_MEMORY_PER_WORKER))
+            # Closing stops the worker processes when the loop ends early.
+            with closing(readings):
+                for index,(job,ahead) in enumerate(readings,1):
+                    if cancel.is_set():break
+                    path,prepared,epoch=job
+                    if prepared is not None:prepared['reading']=ahead
+                    progress(done=index-1,current=path.name)
+                    attempt = {'format': DIAGNOSTIC_FORMATS.get(path.suffix.lower(), 'other'),
+                               'stage': 'storage', 'outcome': 'error', 'epoch': epoch}
+                    attempts.append(attempt)
+                    try:
+                        with db:
+                            result,document_id=self.add_file(db,path,attempt,prepared)
+                            self.event(db,'import',json.dumps({'source':str(path),'result':result,'document':document_id},ensure_ascii=False))
+                        batch.append({'file':path.name,'source':str(path),'status':result,'document_id':document_id})
+                    except Exception as exc:
+                        self._diagnostic('failure_stages', attempt['stage'], epoch=attempt['epoch'])
+                        try:digest=sha256(path)
+                        except OSError:digest='unreadable-'+hashlib.sha256(str(path).encode()).hexdigest()
+                        with db:
+                            db.execute("INSERT INTO arrivals(source,hash,category,error,created) VALUES (?,?,?,?,?) ON CONFLICT(source,hash) DO UPDATE SET error=excluded.error,status='pending'",(str(path),digest,'Ошибки',str(exc),now()))
+                            self.touch(db)
+                        batch.append({'file':path.name,'source':str(path),'status':'Ошибка','reason':str(exc)})
+                    progress(done=index)
             progress(phase='Сопоставление пациентов',current='')
             with self._diagnostic_stage('storage'),db:self.resolve_patients(db)
             progress(phase='Сохранение таблицы')

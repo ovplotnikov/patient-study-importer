@@ -21,7 +21,7 @@ def run(root):
     from tkinter import ttk,messagebox
     from .gui import Application, DOCUMENTS_PER_PAGE
     from .smoke import SAMPLE
-    from . import __version__,updater
+    from . import __version__,ui,updater
     from PIL import Image,ImageGrab,ImageDraw,ImageFont
     from docx import Document
     app=Application()
@@ -403,6 +403,7 @@ def run(root):
                 settle();time.sleep(.02);assert time.monotonic()<deadline,'Recalculation did not start'
             assert app.progress.winfo_ismapped() and app.current_label.winfo_ismapped()
             visible(app.stop_button);assert 'из 1' in app.phase.get(),app.phase.get()
+            assert app.step_labels[1][0].cget('fg')==ui.BLUE,'Processing step is not highlighted'
             capture('11-reparse.png')
             app.stop_button.invoke()
         finally:release.set()

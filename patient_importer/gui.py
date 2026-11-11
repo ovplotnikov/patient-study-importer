@@ -302,7 +302,7 @@ class Application:
 
     def show_reparse_progress(self,count):
         """The same progress view as processing, so a long run is visibly alive."""
-        self.reparsing=True;self.busy(True)
+        self.reparsing=True;self.busy(True);self.set_step(1)
         self.heading.configure(text='Обновляем разбор документов')
         self.phase.set('Подготовка');self.current.set('')
         self.content.clear();self.rendered_queue=None;self.drop.pack_forget();self.pagination.pack_forget()
