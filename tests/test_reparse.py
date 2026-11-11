@@ -2,13 +2,14 @@
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
 from openpyxl import load_workbook
 
-from patient_importer import analysis, gui
+from patient_importer import analysis, gui, parallel
 from patient_importer.storage import ReviewCommittedError, Workspace
 
 FORM = ('Пациент: ТЕСТОВ ТЕСТ ТЕСТОВИЧ\nДата рождения: 01.01.2000\n'
@@ -235,6 +236,57 @@ class ReparseTests(unittest.TestCase):
         self.workspace.reparse_unconfirmed()
         self.assertIn('possible_duplicate', {issue['code'] for issue in self.analysis_of()['quality']['issues']})
 
+    def test_worker_processes_read_like_this_process(self):
+        self.add('a.txt')
+        self.add('b.txt', OTHER)
+        self.broken(0)
+        self.broken(1)
+        def readings():
+            # Row identifiers are new for rows that were lost, so they are left out.
+            result = [json.loads(item['analysis']) for item in self.documents()]
+            for parsed in result:
+                for row in parsed['observations']:
+                    row.pop('result_id')
+            return result
+
+        here = self.workspace.reparse_unconfirmed(workers=1)
+        expected = readings()
+        self.broken(0)
+        self.broken(1)
+        pooled_map = parallel.ordered_map
+        with patch.object(parallel, 'ordered_map', side_effect=lambda *a, **k: pooled_map(*a, **{**k, 'minimum': 1})):
+            pooled = self.workspace.reparse_unconfirmed(workers=2)
+        self.assertEqual(pooled['updated'], here['updated'])
+        self.assertEqual(readings(), expected)
+
+    def test_progress_counts_documents(self):
+        self.add('a.txt')
+        self.add('b.txt', OTHER)
+        self.broken(0)
+        self.broken(1)
+        states = []
+        self.workspace.reparse_unconfirmed(progress=lambda **state: states.append(state))
+        self.assertIn({'phase': 'Обновляем разбор документов', 'total': 2, 'done': 0}, states)
+        self.assertEqual([state['done'] for state in states if 'current' in state and 'done' in state], [1, 2])
+        self.assertFalse(states[-1]['stoppable'])
+
+    def test_stop_leaves_every_document_as_it_was(self):
+        self.add('a.txt')
+        self.add('b.txt', OTHER)
+        self.broken(0)
+        self.broken(1)
+        cancel = threading.Event()
+
+        def progress(**state):
+            if state.get('done') == 1:
+                cancel.set()
+
+        with self.assertRaises(parallel.Cancelled):
+            self.workspace.reparse_unconfirmed(progress=progress, cancel=cancel)
+        self.assertEqual({json.loads(item['analysis'])['version'] for item in self.documents()}, {'2.3.0'})
+        self.assertEqual(self.history(), [])
+        self.assertEqual(self.workspace.summary()['reparse'], 2)
+
     def test_new_import_is_not_offered(self):
         self.add()
         self.assertEqual(self.workspace.summary()['reparse'], 0)
@@ -248,7 +300,9 @@ class MainWindowTests(unittest.TestCase):
         actions.run.return_value = True
         return SimpleNamespace(workspace=workspace, workspace_actions=actions, workspace_busy=lambda: False,
                                workspace_window_open=lambda: False, root=Mock(), current=Mock(), screen='result',
-                               refresh=Mock(), show_documents=Mock(), rendered_queue=None)
+                               refresh=Mock(), show_documents=Mock(), rendered_queue=None, cancel=threading.Event(),
+                               events=Mock(), busy=Mock(), show_reparse_progress=Mock(), stop_button=Mock(),
+                               phase=Mock(), closing=False, reparsing=False)
 
     def test_nothing_starts_without_consent(self):
         app = self.app()
@@ -260,7 +314,24 @@ class MainWindowTests(unittest.TestCase):
         app = self.app()
         with patch.object(gui.messagebox, 'askyesno', return_value=True):
             gui.Application.reparse(app)
-        self.assertIs(app.workspace_actions.run.call_args.args[0], app.workspace.reparse_unconfirmed)
+        work = app.workspace_actions.run.call_args.args[0]
+        self.assertIs(work.func, app.workspace.reparse_unconfirmed)
+        self.assertIs(work.keywords['cancel'], app.cancel)
+        app.show_reparse_progress.assert_called_once_with(3)
+
+    def test_progress_reaches_the_window(self):
+        app = self.app()
+        with patch.object(gui.messagebox, 'askyesno', return_value=True):
+            gui.Application.reparse(app)
+        app.workspace_actions.run.call_args.args[0].keywords['progress'](done=2)
+        app.events.put.assert_called_once_with(('progress', {'done': 2}))
+
+    def test_a_stop_says_nothing_changed(self):
+        app, info, warning, failure = self.run_to_end(None, parallel.Cancelled())
+        self.assertIn('не изменились', app.phase.set.call_args.args[0])
+        for box in (info, warning, failure):
+            box.assert_not_called()
+        app.busy.assert_called_with(False)
 
     def test_nothing_to_do_asks_nothing(self):
         app = self.app(0)

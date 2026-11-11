@@ -59,8 +59,21 @@ def smoke_test(root):
     assert workspace.summary()['total_review']==0
     assert (workspace.root/'Обработано'/'без ФИО.txt').exists()
     assert not (workspace.root/'Нужно уточнить'/'без ФИО.txt').exists()
+    smoke_parallel()
     smoke_ocr(root)
-    return {'ok':True,'checks':['first_import','archive_move','byte_duplicate','incremental_patient','notes_preserved','custom_sheet_preserved','review_confirmation','separate_quality_confirmation','review_move','bundled_ocr','bundled_pdf_rendering','mixed_pdf_ocr'],'summary':workspace.summary()}
+    return {'ok':True,'checks':['worker_processes','first_import','archive_move','byte_duplicate','incremental_patient','notes_preserved','custom_sheet_preserved','review_confirmation','separate_quality_confirmation','review_move','bundled_ocr','bundled_pdf_rendering','mixed_pdf_ocr'],'summary':workspace.summary()}
+
+
+def smoke_parallel():
+    """Worker processes start from the packaged executable and read like this process does."""
+    import os
+    from . import analysis, parallel
+
+    jobs=[(index,(json.dumps({'pages':[SAMPLE],'ocr_pages':[]},ensure_ascii=False),f'{index}.txt')) for index in range(4)]
+    pids={pid for _key,pid in parallel.ordered_map(parallel.process_id,jobs,total=len(jobs),workers=2,minimum=1)}
+    assert pids and os.getpid() not in pids,'reading did not leave the main process'
+    readings=[reading for _key,reading in parallel.ordered_map(analysis.analyze_stored,jobs,total=len(jobs),workers=2,minimum=1)]
+    assert readings==[analysis.analyze_stored(payload) for _key,payload in jobs],'worker reading differs'
 
 
 def smoke_ocr(root):

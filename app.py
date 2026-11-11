@@ -50,6 +50,10 @@ def main():
 
 
 if __name__=='__main__':
+    # Reading runs in worker processes. In the packaged program they start this same
+    # executable, which has to become a worker instead of opening a second window.
+    import multiprocessing
+    multiprocessing.freeze_support()
     try:main()
     except Exception as exc:
         if any(flag in sys.argv for flag in ['--apply-update','--update-probe','--update-lock-probe']):

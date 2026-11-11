@@ -90,15 +90,21 @@ DOCUMENT_DATE_LABELS = (
 )
 
 
+# Layout text can print another field to the left, after a column gap. The gap is
+# checked behind the label: matching the run of spaces itself costs a square of its length.
+DOCUMENT_DATE_PATTERNS = tuple(re.compile(rf'(?:^[ \t]*|(?<=[ \t]{{2}})){label}[ :\t]*({DATE})', re.I | re.M)
+                               for label in DOCUMENT_DATE_LABELS)
+SERVICE_DATE_IN_WORDS = re.compile(r'^\s*Дата выполнения услуги:[ \t]*(\d{1,2})\s+(\w+)\s+(\d{4})', re.I | re.M)
+
+
 def document_dates(text):
     """Collect explicitly labeled dates without substituting DOB or file timestamps."""
     dates = set()
-    for label in DOCUMENT_DATE_LABELS:
-        # Layout text can print another field to the left, after a column gap.
-        for match in re.finditer(rf'(?:^[ \t]*|[ \t]{{2,}}){label}[ :\t]*({DATE})', text, re.I | re.M):
+    for pattern in DOCUMENT_DATE_PATTERNS:
+        for match in pattern.finditer(text):
             if value := iso_date(match[1]):
                 dates.add(value)
-    for match in re.finditer(r'^\s*Дата выполнения услуги:[ \t]*(\d{1,2})\s+(\w+)\s+(\d{4})', text, re.I | re.M):
+    for match in SERVICE_DATE_IN_WORDS.finditer(text):
         if match[2].lower() in MONTHS:
             value = iso_date(f'{int(match[1]):02}.{MONTHS.index(match[2].lower())+1:02}.{match[3]}')
             if value:
@@ -187,8 +193,16 @@ def is_sparse_table(columns):
     return len(columns) >= 4 and columns[:2] == ['label', 'result'] and set(columns[2:]) <= SPARSE_OPTIONAL_COLUMNS
 
 
+LABEL_COLUMN_WORDS = ('показател', 'наименование', 'параметр', 'тест', 'анализ')
+RESULT_COLUMN_WORDS = ('результат', 'значение')
+
+
 def laboratory_header(line):
     """Read ordered header columns, with a conservative fallback for loose labels."""
+    # Every header names a label and a result column. Most lines name neither.
+    lowered = line.lower()
+    if not any(word in lowered for word in RESULT_COLUMN_WORDS) or not any(word in lowered for word in LABEL_COLUMN_WORDS):
+        return None
     columns = [name for part in split_columns(line) for name in header_cells(part)]
     if 'label' in columns and 'result' in columns:
         return columns
