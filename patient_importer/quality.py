@@ -5,6 +5,8 @@ import re
 
 from .parsing import COMPARATOR, KNOWN_UNIT, LABORATORY_TYPES, RANGE, SCALAR, classify_pages, classify_study, document_dates
 
+# The first parser whose results are checked by these rules. A document read by an earlier
+# one is flagged. Later parsers only change what is extracted, so their readings are current.
 REVIEWED_PARSER_VERSION = '2.5.0'
 UNITLESS_LABEL = re.compile(
     r'^(?:ph|рн|inr|мно|цветовой показатель|относительная плотность|удельный вес)(?:\b|$)|'
@@ -26,6 +28,21 @@ URINE_FORMS = frozenset({'ОАМ', 'Нечипоренко'})
 SEDIMENT_LABEL = re.compile(r'лейкоцит|эритроцит|эпители|цилиндр', re.I)
 # Bookkeeping about how a page was read. It says nothing about the extracted values.
 INFORMATIONAL_ISSUES = frozenset({'SIGNATURE_IMAGE'})
+
+
+def version_key(value):
+    try:
+        return tuple(int(part) for part in str(value).split('.'))
+    except ValueError:
+        return None
+
+
+def is_legacy_parser(version):
+    """A reading older than the reviewed parser. A newer parser is not «прежняя версия»."""
+    if not version:
+        return False
+    key = version_key(version)
+    return key is None or key < version_key(REVIEWED_PARSER_VERSION)
 
 
 def has_narrative_result(sections):
@@ -73,8 +90,7 @@ def assess(analysis, extracted=None):
                 issue[key] = value
         findings.append(issue)
 
-    parser_version = analysis.get('version')
-    if parser_version and parser_version != REVIEWED_PARSER_VERSION:
+    if is_legacy_parser(analysis.get('version')):
         add('legacy_parser', 'Документ обработан прежней версией. Сверьте оригинал или распознайте заново.')
 
     pages = analysis.get('pages', [])
@@ -196,3 +212,82 @@ def issues(analysis):
 
 def needs_review(analysis):
     return bool(issues(analysis))
+
+
+# Every quality issue is a flag: the document is saved, its values go to the table, and the
+# reason is shown beside them until a person confirms the document. Only an unknown patient
+# stops a document (see Workspace._category).
+SCAN_CODES = frozenset({
+    'ocr_value', 'ocr_text', 'OCR_USED', 'OCR_DISAGREEMENT', 'OCR_LOW_CONFIDENCE',
+    'OCR_ENGINE_UNAVAILABLE', 'OCR_EMPTY', 'OCR_FAILED',
+})
+SCAN_REASON = 'со скана'
+# In the order a doctor needs them: what is missing first, then what may be wrong.
+REASONS = (
+    ('lab_no_results', 'результаты не найдены'),
+    ('missing_narrative_result', 'заключение не найдено'),
+    ('missing_date', 'нет даты'),
+    ('conflicting_date', 'несколько дат'),
+    ('unknown_type', 'вид не определён'),
+    ('conflicting_type', 'несколько видов'),
+    ('type_mismatch', 'вид под вопросом'),
+    ('page_without_patient', 'страница без ФИО'),
+    ('possible_duplicate', 'возможный повтор'),
+    ('missing_result', 'нет результата'),
+    ('ambiguous_value', 'значение под вопросом'),
+    ('missing_unit', 'нет единицы'),
+    ('unknown_unit', 'незнакомая единица'),
+    ('unmapped_columns', 'неясные столбцы'),
+    ('reprocess_conflict', 'расходится с прежним чтением'),
+    ('legacy_parser', 'прежний разбор'),
+)
+REASON_LABELS = dict(REASONS)
+PARTLY_READ = 'прочитано не полностью'
+# Reasons that concern every value of a document, not only the row they were found in.
+DOCUMENT_WIDE = frozenset({'missing_date', 'conflicting_date', 'reprocess_conflict', 'legacy_parser'})
+UNVERIFIED = 'Не сверено'
+
+
+def unparsed_rows(found):
+    """Table lines the parser could not read: results that are missing from the table."""
+    return len({(issue.get('page'), issue.get('page_index'), issue.get('line'))
+                for issue in found if issue.get('code') == 'unparsed_row'})
+
+
+def issue_label(code):
+    if code == 'unparsed_row':
+        return 'строка не перенесена'
+    if code in SCAN_CODES:
+        return SCAN_REASON
+    return REASON_LABELS.get(code, PARTLY_READ)
+
+
+def reasons(found):
+    """Short reasons for a document's flags, most important first, each once."""
+    codes = {issue.get('code') for issue in found}
+    result = []
+    missing = unparsed_rows(found)
+    if missing:
+        result.append(f'не перенесено строк: {missing}')
+    if codes & SCAN_CODES:
+        result.append(SCAN_REASON)
+    result.extend(label for code, label in REASONS if code in codes)
+    known = SCAN_CODES | REASON_LABELS.keys() | {'unparsed_row'}
+    if codes - known:
+        result.append(PARTLY_READ)
+    return result
+
+
+def unverified(labels):
+    labels = [label for label in dict.fromkeys(labels) if label]
+    return UNVERIFIED + (' · ' + ', '.join(labels) if labels else '')
+
+
+def row_reasons(found, index, item):
+    """Why one value is not verified: its own issues, a scan, or what concerns the whole document."""
+    labels = [SCAN_REASON] if item.get('from_ocr') else []
+    for issue in found:
+        code = issue.get('code')
+        if issue.get('observation_index') == index or code in DOCUMENT_WIDE:
+            labels.append(issue_label(code))
+    return list(dict.fromkeys(labels))

@@ -55,10 +55,11 @@ class NarrativeLabelTests(unittest.TestCase):
         result = parsed(NAME + DAY + ULTRASOUND + 'Паренхима толщ. 15 мм.')
         self.assertEqual(values(result), {('Паренхима', '15')})
 
-    def test_unnamed_number_on_a_lab_form_still_goes_to_review(self):
+    def test_unnamed_number_on_a_lab_form_stays_in_the_text(self):
         result = parsed(NAME + DAY + BLOOD + 'Гемоглобин  120  г/л', 'Другой показатель 5 ммоль/л.')
-        self.assertEqual(only(result, '5')['label'], 'Измерение из описания')
-        self.assertIn('ambiguous_value', codes(result))
+        self.assertNotIn('5', [row['result'] for row in result['observations']])
+        self.assertTrue(any('Другой показатель 5 ммоль/л.' in section['text'] for section in result['sections']))
+        self.assertNotIn('ambiguous_value', codes(result))
 
 
 class NarrativeContextTests(unittest.TestCase):

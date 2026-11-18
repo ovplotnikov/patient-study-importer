@@ -11,7 +11,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--database', type=Path, required=True)
     parser.add_argument('--port', type=int, default=8765)
-    parser.add_argument('--allow-version', action='append', required=True)
+    # Kept so existing service files still start. Any version of the form x.y.z is accepted.
+    parser.add_argument('--allow-version', action='append', default=[], help=argparse.SUPPRESS)
     args = parser.parse_args()
     os.umask(0o077)
     try:

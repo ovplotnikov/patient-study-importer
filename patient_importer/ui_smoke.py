@@ -89,7 +89,8 @@ def run(root):
     external=root/'external files';external.mkdir(exist_ok=True)
     first=external/'Анализ крови.txt';first.write_text(SAMPLE,encoding='utf8')
     second=external/'УЗИ почек.docx';doc=Document();doc.add_paragraph(SAMPLE.replace('02.03.2025','03.03.2025'));doc.save(second)
-    third=external/'Исследование.png'
+    # A folder of its own: in the folder of the other two the patient folder rule would name it.
+    third=external/'Скан'/'Исследование.png';third.parent.mkdir(exist_ok=True)
     synthetic_text=SAMPLE.replace('71.5','<0,05')
     original=Image.new('RGB',(1650,1250),'white');draw=ImageDraw.Draw(original)
     font_path='C:/Windows/Fonts/consola.ttf' if os.name=='nt' else '/System/Library/Fonts/Menlo.ttc'
@@ -132,9 +133,19 @@ def run(root):
     capture('02-result.png')
     app.review();settle();review=app.review_window
     assert review.selected and review.candidates
-    review.window.geometry('850x620');settle();visible(review.confirm_button);capture('review-small-window.png',review.window)
-    review.window.geometry(f'{min(1240,app.root.winfo_screenwidth()-50)}x{min(850,app.root.winfo_screenheight()-130)}');settle()
+    # The window opens as large as the screen; the page takes most of it, the file is shown where the doctor keeps it.
+    assert review.window.winfo_width()>=min(1240,app.root.winfo_screenwidth()-50),review.window.winfo_width()
+    assert review.left.winfo_width()>review.right.winfo_width()
+    assert 'Скан' in review.location_text.get() and 'Исследование.png' in review.location_text.get()
+    assert review.location['path']==third.resolve(),'The window must open the file the doctor added'
+    for button in (review.confirm_button,review.original_button,review.reveal_button):visible(button)
     capture('03-review.png',review.window)
+    review.window.state('normal')
+    for size in ('960x680','850x620'):
+        review.window.geometry(size);settle()
+        for button in (review.confirm_button,review.original_button,review.reveal_button):visible(button)
+    capture('review-small-window.png',review.window)
+    review.window.geometry(f'{min(1240,app.root.winfo_screenwidth()-50)}x{min(850,app.root.winfo_screenheight()-130)}');settle()
     visible(review.confirm_button)
     # Exercise actual PDF rendering, multipage navigation and zoom in the review pane.
     from pypdf import PdfWriter
@@ -191,7 +202,17 @@ def run(root):
     assert preview_handle.raw is None
     assert app.workspace.summary()['review']==0
     assert app.workspace.summary()['quality_review']==1
-    assert app.heading.cget('text')=='Нужно ваше внимание','Identity approval must not approve results'
+    # Flags do not hold the result back: it is done, and checking stays on offer.
+    assert app.heading.cget('text')=='Готово',app.heading.cget('text')
+    def labels(widget):
+        found=[]
+        for child in widget.winfo_children():
+            try:found.append(str(child.cget('text')))
+            except Exception:pass
+            found.extend(labels(child))
+        return found
+    assert 'С пометками: 1' in labels(app.content.body),'Flagged documents must be listed with an optional check'
+    assert not app.review_button.winfo_ismapped(),'No mandatory review button without an unknown patient'
     quality=app.review_window
     assert quality.selected and str(quality.confirm_button['state'])=='disabled'
     visible(quality.confirm_button);visible(quality.attest)
@@ -213,9 +234,9 @@ def run(root):
         assert quality.window.winfo_exists()
     check_background_save('confirm_quality',quality.confirm_button.invoke,while_quality_pending)
     assert quality.selected is None and not quality.records
-    assert app.workspace.summary()['total_review']==0
+    assert app.workspace.summary()['quality_review']==0
     capture('09-quality-finished.png',quality.window);close_review(quality)
-    assert app.heading.cget('text')=='Документы сохранены'
+    assert app.heading.cget('text')=='Готово'
     capture('05-finished.png')
     app.history();settle();history=app.history_window
     native_id=next(r['id'] for r in history.records.values() if r['filename']=='Анализ крови.txt')
@@ -281,11 +302,22 @@ def run(root):
     from .diagnostics_ui import DiagnosticsWindow, SupportWindow
     support_email=diagnostics_config.SUPPORT_EMAIL or 'templates@example.org'
     diagnostics_example='https://script.google.com/macros/s/AKfycb_TEST_DIAGNOSTICS_ONLY_00000000000000000000/exec'
+    # Consent given to the first contract does not carry over: the doctor is asked again.
+    from .diagnostics_ui import EXAMPLE_REPORT, SENT
+    from .telemetry_schema import validate_report
+    (settings_dir/'test-diagnostics').mkdir(parents=True,exist_ok=True)
+    (settings_dir/'test-diagnostics'/'diagnostics.json').write_text(json.dumps({
+        'schema_version':1,'consent_version':1,'consent':True,'endpoint':diagnostics_example,
+        'app_version':'2.5.2','last_attempt':0,'epoch':3,'counters':{'formats':{'pdf':12}}}))
     test_diagnostics=Diagnostics(settings_dir/'test-diagnostics', endpoint=diagnostics_example)
     assert test_diagnostics.should_prompt() and test_diagnostics.mark_prompted()
-    assert not test_diagnostics.enabled
+    assert not test_diagnostics.enabled and test_diagnostics.snapshot() is None
     dialog=DiagnosticsWindow(app.root,test_diagnostics,diagnostics_example,first_run=True)
     settle();visible(dialog.allow_button);visible(dialog.decline_button)
+    texts=[label.cget('text') for label in dialog.labels]
+    assert all(any(line in text for text in texts) for line in SENT),'Every new group is described'
+    assert any('спрашивает снова' in text for text in texts)
+    assert json.loads(dialog.example.get('1.0','end'))==EXAMPLE_REPORT and validate_report(EXAMPLE_REPORT)
     capture('11-diagnostics.png',dialog.window)
     dialog.allow_button.invoke()
     deadline=time.monotonic()+10
@@ -293,6 +325,9 @@ def run(root):
         settle();time.sleep(.03);assert time.monotonic()<deadline
     assert test_diagnostics.enabled
     test_diagnostics.record('formats','pdf',10)
+    assert test_diagnostics.note('path','table_opened') and not test_diagnostics.note('path','C:/Users/x.pdf')
+    test_diagnostics.flush()
+    assert test_diagnostics.snapshot()['counters']['path']=={'table_opened':1}
     dialog=DiagnosticsWindow(app.root,test_diagnostics,diagnostics_example)
     dialog.decline_button.invoke()
     deadline=time.monotonic()+10
@@ -379,7 +414,7 @@ def run(root):
     deadline=time.monotonic()+60
     while quality.save_queue or quality.finishing or quality.session_saved or app.workspace_actions.active:
         settle();time.sleep(.04);assert time.monotonic()<deadline,'Queue save timeout'
-    assert app.workspace.summary()['total_review']==0
+    assert app.workspace.summary()['quality_review']==0
     close_review(quality)
     # Documents of an earlier version are offered a recalculation that keeps the workbook usable.
     with app.workspace.connect() as db,db:

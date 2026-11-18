@@ -422,6 +422,11 @@ class QualityReviewWindow:
         self.enable_confirm()
 
     def close(self):
+        if not getattr(self,'closing_noted',False):
+            self.closing_noted=True
+            from .gui import note
+            from .telemetry_schema import REMAINING, count_bucket
+            note(self,'closed.quality.'+count_bucket(len(self.records),REMAINING))
         if self.finishing:
             self.after_finish=self.window.destroy;return
         if self.actions.active or self.save_queue:
@@ -1166,7 +1171,7 @@ class HistoryWindow:
                 self.status.set('Результат сохранён в базе.')
                 messagebox.showwarning('Результат сохранён',str(error),parent=self.window)
             else:
-                self.status.set('Результат сохранён. Документы с замечаниями доступны в «Проверить документы».')
+                self.status.set('Результат сохранён. Документы с пометками можно сверить кнопкой «Сверить» в окне результатов.')
 
         if self.actions.run(work,completed):
             self.apply_button.configure(state='disabled',text='Сохраняем результат…')

@@ -27,7 +27,9 @@ class IntakeTests(unittest.TestCase):
         (b / 'бланк.txt').write_text(SAMPLE + '\nДругая версия', encoding='utf8')
         result = stage_files(self.ws, [a, b])
         self.assertEqual(len(result['added']), 2)
-        self.assertEqual(len({Path(p).name for p in result['added']}), 2)
+        # Each file stays in the folder it came from, so equal names never meet.
+        self.assertEqual(len(set(result['added'])), 2)
+        self.assertEqual({Path(p).parent.name for p in result['added']}, {'a', 'b'})
         self.assertEqual((a / 'бланк.txt').read_text(encoding='utf8'), SAMPLE)
         self.ws.import_folder()
         self.assertTrue((a / 'бланк.txt').exists())
