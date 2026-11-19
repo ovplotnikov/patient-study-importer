@@ -369,7 +369,11 @@ def run(root):
     assert candidate.winfo_rooty()+candidate.winfo_height()<=app.review_window.editor_area.canvas.winfo_rooty()+app.review_window.editor_area.canvas.winfo_height()
     candidate.invoke();settle();visible(app.review_window.name_entry)
     capture('review-fields-150-percent.png',app.review_window.window)
-    app.review_window.use_candidate(*app.review_window.candidates[0]);app.review_window.confirm();finish()
+    app.review_window.use_candidate(*app.review_window.candidates[0])
+    # A real key press in a shown window: Enter confirms the patient and moves on.
+    app.review_window.name_entry.focus_force();settle()
+    app.review_window.name_entry.event_generate('<Return>');finish()
+    assert not app.review_window.records,'Enter did not confirm the patient'
     app.review_window.next_button.invoke();settle()
     capture('quality-150-percent.png',app.review_window.window)
     visible(app.review_window.confirm_button);visible(app.review_window.attest)

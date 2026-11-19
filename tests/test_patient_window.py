@@ -1,9 +1,11 @@
 """The window «Кому принадлежит документ?»: folder rows, the file as the doctor named it,
 a draft from the folder name and a page large enough to read. Fictional people only."""
+from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
+import re
 import time
 import tkinter as tk
 import unittest
@@ -130,12 +132,13 @@ class LocationTests(unittest.TestCase):
 
     def test_existing_registry_gains_the_table_in_place(self):
         self.add()
-        with sqlite3.connect(self.workspace.database) as db:
+        # «with» on a connection only commits; Windows cannot delete a database left open.
+        with closing(sqlite3.connect(self.workspace.database)) as db, db:
             db.execute('DROP TABLE external_sources')
         reopened = Workspace(self.workspace.root)
         location = reopened.document_location(reopened.review_list()[0]['id'])
         self.assertFalse(location['external'])
-        with sqlite3.connect(reopened.database) as db:
+        with closing(sqlite3.connect(reopened.database)) as db:
             self.assertEqual(db.execute('SELECT count(*) FROM external_sources').fetchone()[0], 0)
 
 
@@ -146,7 +149,10 @@ class WindowBase(unittest.TestCase):
             cls.root = tk.Tk()
         except tk.TclError as exc:
             raise unittest.SkipTest(f'Tk display unavailable: {exc}') from exc
-        cls.root.withdraw()
+        # The window is a transient of the main one. On Windows and Linux a transient of a
+        # withdrawn main window is never shown, so its size and focus would mean nothing.
+        # The main window stays shown, small, as it is when the program runs.
+        cls.root.geometry('200x80+0+0')
         ui.setup(cls.root)
         cls.addClassCleanup(cls.root.destroy)
 
@@ -171,19 +177,42 @@ class WindowBase(unittest.TestCase):
         stage_files(self.workspace, list(folders))
         self.workspace.import_folder()
         window = gui.ReviewWindow(self.root, self.workspace, Mock(), ui.Icons(self.root), actions=ui.WorkspaceActions(self.root))
-        self.settle()
+        self.shown(window.window)
         return window
 
-    def press_enter(self, window):
-        """Press Enter in the window as a doctor would, whether or not this program is the active one.
+    def shown(self, widget):
+        """Wait until the window is on screen and laid out: only then do its sizes mean anything."""
+        deadline = time.monotonic() + 10
+        while not (widget.winfo_ismapped() and widget.winfo_width() > 1):
+            self.root.update()
+            self.assertLess(time.monotonic(), deadline, 'The window was never shown')
+            time.sleep(.02)
+        self.settle()
 
-        Tk delivers a key only to the widget that has the keyboard focus. In a test run in the
-        background no window of the program is active and a generated key would be dropped, so
-        the field takes the focus first, as a click on it would give it.
+    def resized(self, widget, width):
+        deadline = time.monotonic() + 10
+        while widget.winfo_width() != width:
+            self.root.update()
+            self.assertLess(time.monotonic(), deadline, f'The window did not take the width {width}')
+            time.sleep(.02)
+        self.settle();self.settle()
+
+    def press_enter(self, window):
+        """Run what Enter is bound to in the window, the way Tk runs it for a key press.
+
+        Tk routes a key only to the widget with keyboard focus, and the operating system gives
+        focus only to the active program. A test run in the background or on a build server has
+        neither, so the binding on the window is called directly. Delivery of a real key press
+        is checked by the interface scenario (ui_smoke.py) in a shown window.
         """
-        window.name_entry.focus_force()
-        self.root.update()
-        window.name_entry.event_generate('<Return>')
+        script = window.window.bind('<Return>')
+        self.assertTrue(script, 'Enter is not bound in the window')
+        command = re.search(r'\[(\S+) ', script)[1]
+        # The fields Tk substitutes for %# %b %f %h %k %s %t %w %x %y %A %E %K %N %W %T %X %Y %D.
+        fields = ('0', '0', '0', '0', '36', '0', '0', '0', '0', '0', '\r', '0', 'Return', '65293',
+                  str(window.name_entry), '2', '0', '0', '0')
+        self.assertEqual(len(fields), len(window.window._subst_format))
+        window.window.tk.call(command, *fields)
         self.settle(window)
 
     def settle(self, window=None):
@@ -257,7 +286,8 @@ class WindowTests(WindowBase):
     def test_nothing_is_cut_at_the_right_edge_of_a_small_window(self):
         window = self.open(self.patient_folder('Тестова-Примерова Анна Ильинична 11.07.2012 длинное название'))
         for width in (960, 850):
-            window.window.state('normal');window.window.geometry(f'{width}x680');self.settle();self.settle()
+            window.window.state('normal');window.window.geometry(f'{width}x680')
+            self.resized(window.window, width)
             edge = window.window.winfo_rootx() + window.window.winfo_width()
 
             def cut(widget):
@@ -272,6 +302,16 @@ class WindowTests(WindowBase):
 class PreviewTests(WindowBase):
     """The page is drawn at the width of the panel, top first."""
 
+    def rendered(self, window):
+        """Wait for the page to be drawn at the panel's present width (a resize redraws it later)."""
+        deadline = time.monotonic() + 10
+        while (window.preview_photo is None or window.preview_render_job is not None
+               or abs(window.preview_photo.width() - (window.canvas.winfo_width() - 24)) > 2):
+            self.root.update()
+            if time.monotonic() > deadline:
+                return
+            time.sleep(.05)
+
     def test_page_fills_the_panel_and_follows_it(self):
         from reportlab.pdfgen import canvas
         folder = self.folder / 'архив' / 'Папка'
@@ -281,12 +321,12 @@ class PreviewTests(WindowBase):
         page.drawString(50, 780, 'Заключение: учебное.')
         page.save()
         window = self.open(folder)
-        time.sleep(.2);self.settle()
+        self.rendered(window)
         self.assertIsNotNone(window.preview_photo)
         self.assertGreaterEqual(window.preview_photo.width(), window.canvas.winfo_width() - 30)
         self.assertEqual(window.canvas.yview()[0], 0.0)
         window.window.state('normal');window.window.geometry('1000x700');self.settle()
-        time.sleep(.2);self.settle()
+        self.rendered(window)
         self.assertLessEqual(abs(window.preview_photo.width() - (window.canvas.winfo_width() - 24)), 2)
 
 if __name__ == '__main__':
