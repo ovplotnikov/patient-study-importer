@@ -133,7 +133,7 @@ class FlagTests(unittest.TestCase):
     def test_a_file_outside_the_work_folder_never_keeps_it_from_opening(self):
         self.add('без единицы.txt', UNIT_MISSING)
         with self.workspace.connect() as db, db:
-            db.execute("UPDATE arrivals SET source='архив/вне.txt', destination=NULL, category='Нужно уточнить', status='done'")
+            db.execute("UPDATE arrivals SET destination='архив/вне.txt', category='Нужно уточнить', status='done'")
             db.execute("DELETE FROM meta WHERE key='filing_rule'")
         reopened = Workspace(self.root)
         problem, = reopened.problems()
