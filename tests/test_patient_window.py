@@ -16,6 +16,8 @@ from patient_importer.intake import stage_files
 from patient_importer.storage import Workspace
 
 TESTOV = ('ТЕСТОВ ТЕСТ ТЕСТОВИЧ', '2000-01-01')
+# The window redraws the page when the panel changes by this much (ReviewWindow.canvas_resized).
+REDRAW_STEP = 24
 UNNAMED = 'Дата выполнения исследования: 05.03.2025\nЗаключение: учебное {value}.\n'
 BIRTH_ONLY = 'Дата рождения: 01.01.2000\nДата выполнения исследования: 05.03.2025\nЗаключение: учебное.\n'
 
@@ -306,7 +308,7 @@ class PreviewTests(WindowBase):
         """Wait for the page to be drawn at the panel's present width (a resize redraws it later)."""
         deadline = time.monotonic() + 10
         while (window.preview_photo is None or window.preview_render_job is not None
-               or abs(window.preview_photo.width() - (window.canvas.winfo_width() - 24)) > 2):
+               or abs(window.preview_photo.width() - (window.canvas.winfo_width() - 24)) >= REDRAW_STEP):
             self.root.update()
             if time.monotonic() > deadline:
                 return
@@ -323,11 +325,19 @@ class PreviewTests(WindowBase):
         window = self.open(folder)
         self.rendered(window)
         self.assertIsNotNone(window.preview_photo)
-        self.assertGreaterEqual(window.preview_photo.width(), window.canvas.winfo_width() - 30)
+        self.fills(window)
         self.assertEqual(window.canvas.yview()[0], 0.0)
-        window.window.state('normal');window.window.geometry('1000x700');self.settle()
+        before = window.preview_photo.width()
+        window.window.state('normal');window.window.geometry('1000x700');self.resized(window.window, 1000)
         self.rendered(window)
-        self.assertLessEqual(abs(window.preview_photo.width() - (window.canvas.winfo_width() - 24)), 2)
+        self.fills(window)
+        self.assertGreater(abs(window.preview_photo.width() - before), REDRAW_STEP, 'The page did not follow the panel')
+
+    def fills(self, window):
+        """The page takes the panel's width, give or take one redraw step, and needs no sideways scrolling."""
+        panel = window.canvas.winfo_width()
+        self.assertLess(abs(window.preview_photo.width() - (panel - 24)), REDRAW_STEP)
+        self.assertLessEqual(window.preview_photo.width() + 12, panel)
 
 if __name__ == '__main__':
     unittest.main()
