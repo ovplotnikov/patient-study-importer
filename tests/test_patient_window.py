@@ -328,7 +328,8 @@ class PreviewTests(WindowBase):
         self.fills(window)
         self.assertEqual(window.canvas.yview()[0], 0.0)
         before = window.preview_photo.width()
-        window.window.state('normal');window.window.geometry('1000x700');self.resized(window.window, 1000)
+        # The smallest window: clearly narrower than a maximised one even on a 1024-point screen.
+        window.window.state('normal');window.window.geometry('850x620');self.resized(window.window, 850)
         self.rendered(window)
         self.fills(window)
         self.assertGreater(abs(window.preview_photo.width() - before), REDRAW_STEP, 'The page did not follow the panel')
