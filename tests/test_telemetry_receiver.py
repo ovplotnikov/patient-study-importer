@@ -73,17 +73,37 @@ class ReceiverTests(unittest.TestCase):
 
     def rows(self):
         with closing(sqlite3.connect(self.database)) as connection:
-            return connection.execute('SELECT * FROM counters ORDER BY app_version, metric, code').fetchall()
+            return connection.execute('SELECT app_version, metric, code, total FROM weekly_counters '
+                                      'ORDER BY app_version, metric, code').fetchall()
+
+    def reception(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            return {(outcome, reason): total for outcome, reason, total in connection.execute(
+                'SELECT outcome, reason, total FROM reception')}
+
+    def test_flagged_outcome_is_stored_next_to_the_retired_one(self):
+        flagged = {'schema_version': 1, 'app_version': '2.4.0',
+                   'counters': {'formats': {'pdf': 10}, 'outcomes': {'saved_flagged': 6, 'saved': 4}}}
+        retired = {'schema_version': 1, 'app_version': '2.4.0',
+                   'counters': {'formats': {'pdf': 10}, 'outcomes': {'quality_review': 10}}}
+        self.assertEqual(self.send(json.dumps(flagged)), (204, b''))
+        self.assertEqual(self.send(json.dumps(retired)), (204, b''))
+        self.assertEqual(self.rows(), [('2.4.0', 'formats', 'pdf', 20), ('2.4.0', 'outcomes', 'quality_review', 10),
+                                       ('2.4.0', 'outcomes', 'saved', 4), ('2.4.0', 'outcomes', 'saved_flagged', 6)])
 
     def test_aggregate_totals_only(self):
         self.assertEqual(self.send(json.dumps(self.report())), (204, b''))
         self.assertEqual(self.send(json.dumps(self.report(count=12)), content_type='application/json; charset=UTF-8'), (204, b''))
         self.assertEqual(self.rows(), [('2.4.0', 'formats', 'pdf', 22), ('2.4.0', 'outcomes', 'saved', 22)])
         with closing(sqlite3.connect(self.database)) as connection:
-            columns = [row[1] for row in connection.execute('PRAGMA table_info(counters)')]
-            tables = connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-        self.assertEqual(columns, ['app_version', 'metric', 'code', 'total'])
-        self.assertEqual(tables, [('counters',)])
+            columns = [row[1] for row in connection.execute('PRAGMA table_info(weekly_counters)')]
+            tables = connection.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()
+            weeks = {row[0] for row in connection.execute('SELECT week FROM weekly_counters')}
+        self.assertEqual(columns, ['week', 'app_version', 'metric', 'code', 'total'])
+        self.assertEqual(tables, [('reception',), ('weekly_counters',)])
+        self.assertEqual(len(weeks), 1)
+        self.assertRegex(weeks.pop(), r'^[0-9]{4}-W[0-9]{2}$')
+        self.assertEqual(self.reception(), {('accepted', 'schema_1'): 2})
         self.assertNotIn(MARKER.encode(), self.database.read_bytes())
         self.assertEqual(self.logs.getvalue(), '')
 
@@ -92,9 +112,8 @@ class ReceiverTests(unittest.TestCase):
         baseline = self.rows()
         cases = [
             {**self.report(), 'filename': MARKER},
-            {**self.report(), 'counters': {'formats': {'pdf': 10, MARKER: 10}}},
-            self.report(version='9.2718.42'),
-            self.report(count=9),
+            self.report(version='9.27181.42'),
+            self.report(version=MARKER),
             self.report(count=True),
             self.report(count=1_000_001),
             self.report(count=10.5),
@@ -104,7 +123,41 @@ class ReceiverTests(unittest.TestCase):
                 self.assertEqual(self.send(json.dumps(report)), (400, b''))
         self.assertEqual(self.rows(), baseline)
         self.assertNotIn(MARKER.encode(), self.database.read_bytes())
+        self.assertEqual(self.reception()[('refused', 'format')], len(cases))
         self.assertEqual(self.logs.getvalue(), '')
+
+    def test_unknown_codes_are_counted_without_their_text(self):
+        path = 'C:/Users/' + MARKER + '/file.pdf'
+        report = {'schema_version': 2, 'app_version': '2.6.1', 'counters': {
+            'formats': {'pdf': 3, MARKER: 2}, 'errors': {'window.ValueError.gui.' + MARKER.lower() + 'x.1': 1,
+                                                          'window.' + path: 1},
+            'patient_' + MARKER.lower(): {'x': 4}}}
+        self.assertEqual(self.send(json.dumps(report)), (204, b''))
+        self.assertEqual(self.rows(), [('2.6.1', '_unknown', '_unknown', 4), ('2.6.1', 'errors', '_unknown', 1),
+                                       ('2.6.1', 'errors', 'window.ValueError.gui.' + MARKER.lower() + 'x.1', 1),
+                                       ('2.6.1', 'formats', '_unknown', 2), ('2.6.1', 'formats', 'pdf', 3)])
+        self.assertNotIn(path.encode(), self.database.read_bytes())
+        self.assertNotIn(MARKER.encode(), self.database.read_bytes())
+        self.assertEqual(self.reception(), {('accepted', 'schema_2'): 1})
+
+    def test_schema_one_of_any_version_and_small_reports_are_accepted(self):
+        for version in ('2.4.0', '2.5.2', '3.0.0'):
+            self.assertEqual(self.send(json.dumps(self.report(version=version, count=1))), (204, b''))
+        self.assertEqual({row[0] for row in self.rows()}, {'2.4.0', '2.5.2', '3.0.0'})
+
+    def test_versions_and_failure_places_per_week_are_bounded(self):
+        from patient_importer.telemetry_schema import MAX_CODES_PER_WEEK, MAX_VERSIONS_PER_WEEK
+        for minor in range(MAX_VERSIONS_PER_WEEK + 2):
+            self.assertEqual(self.send(json.dumps(self.report(version=f'2.{minor}.0', count=1))), (204, b''))
+        versions = {row[0] for row in self.rows()}
+        self.assertEqual(len(versions), MAX_VERSIONS_PER_WEEK + 1)
+        self.assertIn('other', versions)
+        places = {f'window.ValueError.gui.function_{index}.1': 1 for index in range(MAX_CODES_PER_WEEK['errors'] + 5)}
+        report = {'schema_version': 2, 'app_version': '2.0.0', 'counters': {'errors': places}}
+        self.assertEqual(self.send(json.dumps(report)), (204, b''))
+        codes = [row[2] for row in self.rows() if row[1] == 'errors']
+        self.assertEqual(len(codes), MAX_CODES_PER_WEEK['errors'] + 1)
+        self.assertIn('_other', codes)
 
     def test_rejects_malformed_json_duplicate_keys_and_wrong_route(self):
         report = json.dumps(self.report()).encode()
@@ -122,6 +175,7 @@ class ReceiverTests(unittest.TestCase):
             self.assertEqual(self.send(report, path=path), (404, b''))
         self.assertEqual(self.send(report, content_type='multipart/form-data; boundary=' + MARKER), (415, b''))
         self.assertEqual(self.rows(), [])
+        self.assertEqual(self.reception(), {('refused', 'format'): len(cases), ('refused', 'content_type'): 1})
         self.assertEqual(self.logs.getvalue(), '')
 
     def test_bounds_body_and_does_not_reflect_parse_errors(self):
@@ -131,7 +185,7 @@ class ReceiverTests(unittest.TestCase):
             (b'Content-Length: 5\r\nContent-Length: 5\r\n\r\n', 400),
             (b'Content-Length: -1\r\n\r\n', 400),
             (b'Content-Length: 5\r\n\r\n{}', 400),
-            (b'Content-Length: 8193\r\n\r\n', 413),
+            (b'Content-Length: 16385\r\n\r\n', 413),
             (b'Transfer-Encoding: chunked\r\n\r\n', 400),
             (b'Content-Encoding: gzip\r\nContent-Length: 5\r\n\r\n', 400),
             (b'Expect: 100-continue\r\nContent-Length: 5\r\n\r\n', 417),
@@ -152,6 +206,7 @@ class ReceiverTests(unittest.TestCase):
         with patch.object(self.server.budget, 'take', return_value=False):
             self.assertEqual(self.send(body), (429, b''))
         self.assertEqual(self.rows(), [])
+        self.assertEqual(self.reception(), {('refused', 'storage'): 1, ('refused', 'rate_limited'): 1})
         self.assertEqual(self.logs.getvalue(), '')
 
     def send_client_over_loopback(self, client):
@@ -187,7 +242,7 @@ class ReceiverTests(unittest.TestCase):
         self.assertFalse(client.record('review_reasons', MARKER))
         self.assertTrue(client.record('formats', 'pdf', 10))
         self.assertTrue(client.record('outcomes', 'saved', 10))
-        self.assertEqual(self.send_client_over_loopback(client), self.report())
+        self.assertEqual(self.send_client_over_loopback(client), {**self.report(), 'schema_version': 2})
         self.assertEqual(self.rows(), [('2.4.0', 'formats', 'pdf', 10), ('2.4.0', 'outcomes', 'saved', 10)])
 
     def test_workspace_review_and_errors_do_not_cross_wire_boundary(self):
@@ -227,7 +282,7 @@ class ReceiverTests(unittest.TestCase):
         report = self.send_client_over_loopback(client)
         counters = report['counters']
         self.assertEqual(counters['formats'], {'txt': 10})
-        self.assertEqual(counters['outcomes'], {'saved': 8, 'error': 1, 'quality_review': 1})
+        self.assertEqual(counters['outcomes'], {'saved': 8, 'error': 1, 'saved_flagged': 1})
         self.assertEqual(counters['failure_stages'], {'extraction': 1})
         self.assertEqual(counters['edit_categories']['result'], 1)
         self.assertEqual(counters['edit_categories']['unit'], 1)

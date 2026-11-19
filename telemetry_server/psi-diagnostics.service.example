@@ -9,7 +9,7 @@ StateDirectory=psi-diagnostics
 StateDirectoryMode=0700
 WorkingDirectory=/opt/patient-study-importer
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=/usr/bin/python3 -m telemetry_server --database /var/lib/psi-diagnostics/counts.sqlite3 --allow-version 2.4.0
+ExecStart=/usr/bin/python3 -m telemetry_server --database /var/lib/psi-diagnostics/counts.sqlite3
 Restart=on-failure
 RestartSec=5s
 UMask=0077

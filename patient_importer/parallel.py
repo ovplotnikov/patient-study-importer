@@ -64,13 +64,14 @@ def _check(cancel):
         raise Cancelled
 
 
-def ordered_map(function, jobs, *, total, workers=None, cancel=None, minimum=None):
+def ordered_map(function, jobs, *, total, workers=None, cancel=None, minimum=None, on_broken=None):
     """Yield (key, function(payload)) for (key, payload) jobs in their order.
 
     `function` must be a module-level function of plain data. Keys stay in this
     process, so they may be anything. A payload of None has nothing to compute and
-    yields None. Raises Cancelled when `cancel` is set.
+    yields None. Raises Cancelled when `cancel` is set. `on_broken` is told once that a worker died.
     """
+    broken = _Once(on_broken)
     workers = worker_count() if workers is None else workers
     minimum = MINIMUM_FOR_POOL if minimum is None else minimum
     jobs = iter(jobs)
@@ -87,14 +88,15 @@ def ordered_map(function, jobs, *, total, workers=None, cancel=None, minimum=Non
                     future = executor.submit(function, payload)
                 except BrokenProcessPool:
                     # The rest is read here, below.
+                    broken()
                     pending.append((key, payload, None))
                     break
                 pending.append((key, payload, future))
                 # A bounded window keeps memory flat however many documents there are.
                 while len(pending) >= workers * 4:
-                    yield _take(pending, function, cancel)
+                    yield _take(pending, function, cancel, broken)
             while pending:
-                yield _take(pending, function, cancel)
+                yield _take(pending, function, cancel, broken)
         finally:
             executor.shutdown(wait=True, cancel_futures=True)
     for key, payload in jobs:
@@ -109,7 +111,20 @@ def _start(workers):
         return None
 
 
-def _take(pending, function, cancel):
+class _Once:
+    def __init__(self, callback):
+        self.callback = callback
+
+    def __call__(self):
+        callback, self.callback = self.callback, None
+        if callback is not None:
+            try:
+                callback()
+            except Exception:
+                pass
+
+
+def _take(pending, function, cancel, broken=lambda: None):
     key, payload, future = pending.popleft()
     if future is DONE:
         return key, None
@@ -121,5 +136,6 @@ def _take(pending, function, cancel):
             continue
         except BrokenProcessPool:
             # A worker died, for example when memory ran out. Finish here.
+            broken()
             break
     return key, function(payload)

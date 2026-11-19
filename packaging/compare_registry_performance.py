@@ -95,12 +95,19 @@ def seed(workspace, count):
         db.executemany(
             '''INSERT INTO arrivals (source,hash,document_id,category,destination,status,created)
                VALUES (?,?,?,?,?,'done',?)''',
-            ((filename, digest, ident, 'Нужно уточнить' if needs_review else 'Обработано',
-              f'архив/{filename}', STAMP)
+            # Every document names its patient, so since 2.6 a flag no longer holds a file back.
+            # Filed that way here, neither version has a move to make on opening the registry.
+            ((filename, digest, ident, 'Обработано', f'архив/{filename}', STAMP)
              for ident, digest, filename, needs_review in rows),
         )
     return {'documents': count, 'observations_per_document': OBSERVATIONS, 'evidence_per_document': 63,
             'database_bytes': workspace.database.stat().st_size}
+
+
+# Not compared: the workbook path, and fields a release added or redefined on purpose.
+# 2.5.0 added «reparse». 2.6 added «scanned» and «unparsed», and «total_review» now counts only
+# documents waiting for a person (unknown patient); flagged documents no longer wait.
+CHANGED_SUMMARY = ('workbook', 'reparse', 'scanned', 'unparsed', 'total_review')
 
 
 def status(record, needs_review):
@@ -156,7 +163,7 @@ def worker(mode, directory, count, batch_count, repeats):
             return [status(documents[ident], needs_review) for ident in ids]
 
     summary, counters = measure(workspace.summary, repeats,
-                                lambda result: {key: value for key, value in result.items() if key not in ('workbook', 'reparse')})
+                                lambda result: {key: value for key, value in result.items() if key not in CHANGED_SUMMARY})
     batch, statuses = measure(batch_statuses, repeats, lambda result: result)
     if (counters['documents'] != count or counters['quality_review'] != (count + 9) // 10
             or statuses.count('quality_review') != (len(ids) + 9) // 10

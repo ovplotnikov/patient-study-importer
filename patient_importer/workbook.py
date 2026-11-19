@@ -23,7 +23,7 @@ CLINICAL_TABLE_BASE = 100
 
 HEADERS={
  'Пациенты':['PatientID','ФИО','Дата рождения','Документов'],
- 'Исследования':['StudyID','PatientID','Пациент','Дата документа','Вид документа','Статус','Показателей','Основание сопоставления','Файл'],
+ 'Исследования':['StudyID','PatientID','Пациент','Дата документа','Вид документа','Статус','Показателей','Не перенесено строк','Основание сопоставления','Файл'],
  'Показатели':['ResultID','StudyID','PatientID','Пациент','Дата показателя','Основание даты','Раздел','Показатель','Результат','Число','Единицы','Сторона','Референс','Флаг','Источник значения','Статус извлечения','Страница','Строка','Исходный фрагмент','Примечание сверки'],
  'Заключения':['TextID','StudyID','PatientID','Раздел','Текст','Страница','Строка'],
  'Проверка':['ReviewID','StudyID','Файл','Что проверить','Подробности'],
@@ -61,10 +61,14 @@ def rows_for(workspace,db):
         name=patients[pid]['name'] if pid else ''
         duplicate_of = a.get('duplicate_of')
         outstanding = quality.issues(a)
+        flags = quality.reasons(outstanding)
+        # A table line that was not read is a result missing from the table, even after a review.
+        missing_rows = quality.unparsed_rows(outstanding + a['quality'].get('accepted_missing', []))
         if duplicate_of:
             status = 'Подтверждённый дубль'
             observations, sections = [], []
             reason = 'Основное исследование: '+duplicate_of
+            missing_rows = 0
         else:
             observations, sections = a['observations'], a['sections']
             reason = document['reason']
@@ -72,7 +76,7 @@ def rows_for(workspace,db):
                 status = 'Уточнить пациента'
                 rows['Проверка'].append([stable_id(sid,'identity'),sid,document['filename'],'Уточнить пациента',reason])
             elif outstanding:
-                status = 'Проверить данные'
+                status = quality.unverified(flags)
             elif a['quality'].get('confirmed'):
                 status = 'Сверено · неполные данные' if a['quality'].get('incomplete') else 'Проверено'
             else:
@@ -85,14 +89,25 @@ def rows_for(workspace,db):
                 detail = issue['message']
                 if issue.get('page'):
                     detail = f"Страница {issue['page']}. {detail}"
-                rows['Проверка'].append([stable_id(sid,'quality',issue['id']),sid,document['filename'],'Проверить данные',detail])
-        rows['Исследования'].append([sid,pid,name,a['date'],a['type'],status,len(observations),reason,document['filename']])
+                what = quality.issue_label(issue['code'])
+                rows['Проверка'].append([stable_id(sid,'quality',issue['id']),sid,document['filename'],
+                                         quality.unverified([what]),detail])
+        rows['Исследования'].append([sid,pid,name,a['date'],a['type'],status,len(observations),missing_rows or None,reason,document['filename']])
         if not duplicate_of:
+            scan = {code for code in quality.SCAN_CODES if any(issue['code'] == code for issue in outstanding)}
             studies.append({'id':sid,'patient_id':pid,'name':name,'birth':patients[pid]['birth'] if pid else '','date':a['date'],
-                            'kind':a['type'],'status':status,'filename':document['filename'],'observations':observations,'sections':sections})
+                            'kind':a['type'],'status':status,'filename':document['filename'],'observations':observations,'sections':sections,
+                            'verified':not outstanding,'flags':[flag for flag in flags if flag != quality.SCAN_REASON],
+                            'scan_text':bool(scan),'ocr_pages':set(a.get('ocr_pages', ()))})
         for index,item in enumerate(observations):
             result_id=item.get('result_id') or stable_id(sid,item['page'],item['line'],index)
-            item_status = 'Черновик · сверить' if not pid or outstanding else item['status']
+            if not pid:
+                item_status = quality.unverified(['пациент не определён'])
+            elif outstanding:
+                own = quality.row_reasons(outstanding, index, item)
+                item_status = quality.unverified(own) if own or item['status'] == 'Проверить' else item['status']
+            else:
+                item_status = item['status']
             rows['Показатели'].append([result_id,sid,pid,name,item['date'],item['date_source'],item['section'],item['label'],item['result'],item['number'],item['unit'],item['side'],item['reference'],item['flag'],item['origin'],item_status,item['page'],item['line'],item['raw'],item.get('review_comment','')])
         for index,item in enumerate(sections):
             for part,start in enumerate(range(0,max(1,len(item['text'])),30000)):
@@ -343,13 +358,13 @@ def export_workbook(workspace,db):
     summary['A1'].font=Font(name='Calibri',size=18,bold=True,color='244C65')
     summary.append(['Обновлено',datetime.now()]);summary['B2'].number_format='dd.mm.yyyy hh:mm'
     metrics=workspace.summary(db)
-    for label,value in [('Документов',metrics['documents']),('Пациентов',metrics['patients']),('Уточнить пациента',metrics['review']),('Проверить данные',metrics['quality_review']),('Повторов файлов',metrics['duplicates']),('Ошибок чтения',metrics['errors']),('Извлечено показателей',len(data['Показатели']))]:summary.append([label,value])
+    for label,value in [('Документов',metrics['documents']),('Пациентов',metrics['patients']),('Уточнить пациента',metrics['review']),('Не сверено',metrics['quality_review']),('Из них со скана',metrics.get('scanned',0)),('Из них не все строки перенесены',metrics.get('unparsed',0)),('Повторов файлов',metrics['duplicates']),('Ошибок чтения',metrics['errors']),('Извлечено показателей',len(data['Показатели']))]:summary.append([label,value])
     summary.append([])
     summary.append(['Новые файлы','Добавьте в «Входящие» и нажмите «Обработать».'])
-    summary.append(['Уточнения','Откройте «Проверить документы» в программе. Строки со статусом «Черновик · сверить» требуют проверки по оригиналу.'])
+    summary.append(['Что значит «Не сверено»','Значения со сканов и с пометками попадают в таблицу сразу. Статус «Не сверено» и причина рядом означают, что перед использованием значение нужно сверить с оригиналом. «Не перенесено строк» — строки бланка, которые программа не смогла разобрать: этих результатов нет в таблице. Сверить и подтвердить документ можно в программе, кнопкой «Сверить» после обработки.'])
     summary.append(['Свод и листы анализов','Каждая строка листа анализа — одно исследование. Анализы разных лет — разные строки, это не дубли. «Свод» показывает последние результаты пациента, «Динамика» — значения по годам. Документы без подтверждённого пациента сюда не попадают.'])
     summary.append(['Ручные записи','Колонка «Заметки», дополнительные колонки и отдельные листы сохраняются при обновлении.'])
-    summary.append(['Измерения из описаний','Сохраняются вместе с датой, стороной и исходным контекстом. Отметка «Проверить» означает необходимость сверки.'])
+    summary.append(['Измерения из описаний','Сохраняются вместе с датой, стороной и исходным контекстом, только когда у числа есть понятное название. Остальные числа остаются в тексте описания на листе «Заключения».'])
     summary.column_dimensions['A'].width=33;summary.column_dimensions['B'].width=95
     summary.sheet_view.showGridLines=False
     summary_alignment = Alignment(wrap_text=True, vertical='center')

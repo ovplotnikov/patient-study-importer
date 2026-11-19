@@ -52,13 +52,14 @@ def smoke_test(root):
     workspace.import_folder();pending=workspace.review_list()
     assert len(pending)==1
     workspace.assign(pending[0]['id'],'ТЕСТОВ ТЕСТ ТЕСТОВИЧ','2000-01-01')
-    assert workspace.summary()['review']==0
+    # Once the patient is known the document is filed. Its flags stay until an optional check.
+    assert workspace.summary()['review']==0 and workspace.summary()['total_review']==0
     assert workspace.summary()['quality_review']==1
-    assert (workspace.root/'Нужно уточнить'/'без ФИО.txt').exists()
-    workspace.confirm_quality(pending[0]['id'],note='Тестовое заключение сверено; в оригинале нет даты и вида.')
-    assert workspace.summary()['total_review']==0
     assert (workspace.root/'Обработано'/'без ФИО.txt').exists()
     assert not (workspace.root/'Нужно уточнить'/'без ФИО.txt').exists()
+    workspace.confirm_quality(pending[0]['id'],note='Тестовое заключение сверено; в оригинале нет даты и вида.')
+    assert workspace.summary()['quality_review']==0
+    assert (workspace.root/'Обработано'/'без ФИО.txt').exists()
     smoke_parallel()
     smoke_ocr(root)
     return {'ok':True,'checks':['worker_processes','worker_ocr','first_import','archive_move','byte_duplicate','incremental_patient','notes_preserved','custom_sheet_preserved','review_confirmation','separate_quality_confirmation','review_move','bundled_ocr','bundled_pdf_rendering','mixed_pdf_ocr'],'summary':workspace.summary()}

@@ -7,14 +7,16 @@ import re
 import unicodedata
 
 from .parsing import (
-    COMPARATOR, LABORATORY_TYPES, POWER, RANGE, SCALAR, classify_pages, document_date,
+    COMPARATOR, POWER, RANGE, SCALAR, classify_pages, document_date,
     document_dates, identity, iso_date, laboratory_header, laboratory_rows,
     normalized, numeric_value, spaced,
 )
-from .quality import REVIEWED_PARSER_VERSION, assess
+from .quality import assess
 
-# Changing this offers existing unconfirmed documents a recalculation.
-PARSER_VERSION=REVIEWED_PARSER_VERSION
+# Changing this offers existing unconfirmed documents a recalculation. It is the version of
+# the parsing rules, not of the program. 2.6.0: numbers without a name in a description are
+# no longer extracted. Readings by 2.5.0 stay current (see quality.is_legacy_parser).
+PARSER_VERSION='2.6.0'
 SECTIONS=re.compile(r'^(Жалобы|Анамнез(?: заболевания| жизни)?|Объективный статус|Объективно|Диагноз[^:]*|Клинический диагноз|Заключение[^:]*|Рекомендации[^:]*|Лечение|Назначения|Проведенные обследования|Результаты[^:]*|Описание[^:]*|Осмотр)\s*:',re.I)
 NUMBER = rf'(?:{COMPARATOR}\s*)?{SCALAR}(?:{POWER}|{RANGE})'
 NUMBER_START = r'(?<![\w.,<>≤≥+−–^×·⋅-])'
@@ -84,9 +86,8 @@ def section_name(clean):
 
 
 def narrative(pages, day, ocr_pages, kind, table_pages=frozenset()):
-    # An unnamed number in a known prose report stays in its text. On a lab or unknown
-    # form it may be a table row that was not read, so it goes to review.
-    keep_unnamed=kind in LABORATORY_TYPES or kind=='Документ'
+    # A number with no name says nothing on its own: it stays in the text of its section,
+    # which is kept whole, and never becomes a value of its own.
     values=[];sections=[]
     for page_no,page in enumerate(pages,1):
         # Laboratory fields are already extracted by the layout parser.
@@ -128,7 +129,7 @@ def narrative(pages, day, ocr_pages, kind, table_pages=frozenset()):
                 if any(start<=match.start()<end for start,end in occupied):continue
                 before=clean[:match.start()]
                 metric=metric_from(context+' '+before,UNNAMED_METRIC)
-                if metric==UNNAMED_METRIC and not keep_unnamed:continue
+                if metric==UNNAMED_METRIC:continue
                 side=side_from(context+' '+before) if metric in KIDNEY_METRICS else ''
                 fragments.append((match.start(),match.end(),metric,match['value'].strip(),match['unit'],side))
             for start,end,metric,result,unit,side in sorted(fragments):
@@ -137,7 +138,7 @@ def narrative(pages, day, ocr_pages, kind, table_pages=frozenset()):
                 # A number from the history with no date cannot be placed in time. It stays in the text.
                 if historical and not local_day:continue
                 date_source='Дата в тексте' if line_day or anchor else section_source
-                status='Проверить' if page_no in ocr_pages or not local_day or metric==UNNAMED_METRIC else 'Извлечено'
+                status='Проверить' if page_no in ocr_pages or not local_day else 'Извлечено'
                 values.append({'page':page_no,'line':index,'section':section,'label':metric,'result':result,'number':numeric_value(result),
                                'unit':unit,'reference':'','raw':clean,'flag':'','comment':'','side':side,'date':local_day,
                                'date_source':date_source,'origin':'Анамнез' if historical else 'Описание',
@@ -224,8 +225,23 @@ def analyze(extracted, filename):
     return result
 
 
+FOLDER_REASON='По папке пациента: в других документах этой папки прочитан только этот пациент'
+FOLDER_CANDIDATE_LIMIT=6
+
+
+def folder_parts(folder):
+    """Folders a document was filed in, outermost first, without the program's own queue folder."""
+    parts=[part for part in re.split(r'[\\/]+',folder or '') if part and part!='.']
+    return tuple(parts[1:] if parts and parts[0]=='Входящие' else parts)
+
+
 def resolve(analyses, known_patients):
-    """Return exact identities or review candidates. Folder names never invent identity."""
+    """Return exact identities or review candidates.
+
+    A folder name is never read for identity. People keep one patient per folder, so when the
+    documents lying in one folder name a single patient, its documents that name nobody follow.
+    Files loose in the queue are a pile, not a folder, and are matched by their content alone.
+    """
     keys=set((patient['name'],patient['birth']) for patient in known_patients)
     confirmed=set(keys)
     for item in analyses:
@@ -274,4 +290,22 @@ def resolve(analyses, known_patients):
             result['reason']='Пациент отличается от остальных документов в этой папке'
         elif owner and not result['key'] and owner not in result['candidates']:
             result['candidates'].append(owner)
+    # A patient confirmed by a person for one document counts like one read from it.
+    confirmed_by_id={patient.get('id'):(patient['name'],patient['birth']) for patient in known_patients}
+    named=defaultdict(set)
+    for item in analyses:
+        key=(confirmed_by_id.get(item.get('patient_id')) if item.get('decision') else None) or results[item['id']]['key']
+        parts=folder_parts(item['folder'])
+        if key and parts:named[parts].add(key)
+    for item in analyses:
+        result=results[item['id']]
+        if result['key'] or item.get('decision'):continue
+        people=named.get(folder_parts(item['folder']))
+        if not people:continue
+        a=item['analysis']
+        owner=next(iter(people))
+        if len(people)==1 and set(a['names'])<={owner[0]} and set(a['births'])<={owner[1]}:
+            results[item['id']]={'key':owner,'reason':FOLDER_REASON,'candidates':[]}
+        elif len(people)<=FOLDER_CANDIDATE_LIMIT:
+            result['candidates'].extend(key for key in sorted(people) if key not in result['candidates'])
     return results

@@ -11,7 +11,8 @@ from unittest.mock import Mock, patch
 from openpyxl import load_workbook
 
 from patient_importer import clinical_sheets as sheets, quality_ui, ui
-from patient_importer.analysis import analyze
+from patient_importer.analysis import UNNAMED_METRIC, analyze
+from patient_importer.quality import assess
 from patient_importer.parsing import laboratory_rows
 from patient_importer.storage import Workspace
 
@@ -297,7 +298,18 @@ class WindowRegressionTests(WorkspaceCase):
         self.assertEqual(review.current['label'], 'Эритроциты')
 
     def test_entering_a_date_does_not_close_a_number_without_a_name(self):
+        # Versions before 2.6.0 extracted such numbers. Their stored readings still open as rows.
         self.add('a.txt', HEAD + 'Учебное описание 12 мг/л.')
+        with self.workspace.connect() as db, db:
+            stored = db.execute('SELECT id, analysis, extracted FROM documents').fetchone()
+            parsed = json.loads(stored['analysis'])
+            parsed['observations'].append({
+                'page': 1, 'page_index': 1, 'line': 3, 'section': 'Описание исследования', 'label': UNNAMED_METRIC,
+                'result': '12', 'number': 12.0, 'unit': 'мг/л', 'reference': '', 'raw': 'Учебное описание 12 мг/л.',
+                'flag': '', 'comment': '', 'side': '', 'date': None, 'date_source': 'Дата документа',
+                'origin': 'Описание', 'status': 'Проверить', 'from_ocr': False})
+            parsed['quality'] = assess(parsed, json.loads(stored['extracted']))
+            db.execute('UPDATE documents SET analysis=? WHERE id=?', (json.dumps(parsed, ensure_ascii=False), stored['id']))
         review = self.open()
         self.assertEqual(review.current['kind'], 'date')
         before = len(review.items)

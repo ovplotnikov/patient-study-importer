@@ -1,6 +1,8 @@
 """Shared desktop presentation primitives and bundled library icons."""
+import os
 from pathlib import Path
 from queue import Empty, SimpleQueue
+import re
 from threading import Thread
 import tkinter as tk
 from tkinter import ttk
@@ -9,6 +11,90 @@ from PIL import Image, ImageTk
 BLUE='#075bbe'; INK='#17212f'; MUTED='#586779'; LINE='#dbe2ea'; PALE='#eef5ff'
 FONT='Segoe UI'
 ASSETS=Path(__file__).resolve().parent/'assets'
+# Frame drawn around a window before it can be measured: borders and the title bar.
+FRAME_GUESS=(8,31) if os.name=='nt' else (0,28)
+
+
+def work_area(window):
+    """(x, y, width, height) of the screen without the taskbar, in the pixels Tk uses."""
+    if os.name=='nt':
+        try:
+            import ctypes
+            from ctypes import wintypes
+            rect=wintypes.RECT()
+            if ctypes.windll.user32.SystemParametersInfoW(0x0030,0,ctypes.byref(rect),0):  # SPI_GETWORKAREA
+                return rect.left,rect.top,rect.right-rect.left,rect.bottom-rect.top
+        except Exception:
+            pass
+    # macOS keeps a menu bar and a dock; other systems a panel.
+    return 0,0,window.winfo_screenwidth(),window.winfo_screenheight()-80
+
+
+def window_frame(window):
+    """(side, top) of the frame around a shown window, measured, or a guess before it is shown."""
+    try:
+        window.update_idletasks()
+        match=re.fullmatch(r'\d+x\d+([+-]-?\d+)([+-]-?\d+)',window.wm_geometry())
+        if match and window.winfo_ismapped():
+            side=window.winfo_rootx()-int(match[1]);top=window.winfo_rooty()-int(match[2])
+            if 0<=side<=64 and 0<=top<=160:
+                return side,top
+    except (tk.TclError,ValueError):
+        pass
+    return FRAME_GUESS
+
+
+def in_work_area(window):
+    """Whether all of the window, its frame included, lies inside the work area."""
+    x,y,width,height=work_area(window)
+    if window.state()=='zoomed':
+        # A maximised window's borders lie off the screen; what shows is its client area.
+        return (window.winfo_rootx()>=x and window.winfo_rooty()>=y
+                and window.winfo_rootx()+window.winfo_width()<=x+width
+                and window.winfo_rooty()+window.winfo_height()<=y+height)
+    side,top=window_frame(window)
+    left=window.winfo_rootx()-side;upper=window.winfo_rooty()-top
+    return (left>=x and upper>=y and window.winfo_rootx()+window.winfo_width()+side<=x+width
+            and window.winfo_rooty()+window.winfo_height()+side<=y+height)
+
+
+def fit_window(window,width=None,height=None):
+    """Size and place the window so that all of it is in the work area; None takes all the room."""
+    x,y,area_width,area_height=work_area(window)
+    side,top=window_frame(window)
+    room_width=area_width-2*side;room_height=area_height-top-side
+    width=min(width or room_width,room_width);height=min(height or room_height,room_height)
+    if window.state()=='zoomed':window.state('normal')
+    window.geometry(f'{width}x{height}+{x+(room_width-width)//2}+{y+(room_height-height)//2}')
+
+
+def place_window(window,width=None,height=None,*,maximize=False):
+    """Keep a window inside the work area: sized now by a guess, corrected once it is shown.
+
+    A taskbar must never hide a window's buttons, whatever the screen and its scale.
+    """
+    if maximize:
+        try:window.state('zoomed')  # The system's own maximise leaves the taskbar free.
+        except tk.TclError:fit_window(window)
+        else:
+            if window.state()!='zoomed':fit_window(window)
+    else:
+        fit_window(window,width,height)
+
+    def shown(event):
+        if event.widget is not window or getattr(window,'_placed',False):return
+        window._placed=True
+
+        def correct():
+            if window.winfo_exists() and not in_work_area(window):fit_window(window,width,height)
+        window.after_idle(correct)
+    window.bind('<Map>',shown,add='+')
+
+
+def text_scale(window):
+    """How much larger than at 100 % the text is drawn: 1.5 at 150 %."""
+    try:return max(1.0,float(window.tk.call('tk','scaling'))/(96/72))
+    except (tk.TclError,ValueError):return 1.0
 
 
 class WorkspaceActions:

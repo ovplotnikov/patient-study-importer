@@ -204,3 +204,74 @@ def patient_groups(records):
             groups.setdefault((name, birth, basis), []).append(record['id'])
     return [{'name': name, 'birth': birth, 'basis': basis, 'documents': documents}
             for (name, birth, basis), documents in sorted(groups.items())]
+
+
+def folder_key(record):
+    """Documents that name nobody, lying in a folder no one is known in yet, share one answer."""
+    from .analysis import folder_parts
+    if (record.get('names') or record.get('births') or record.get('scan') or record.get('identity_from_ocr')
+            or record.get('folder_settled') or not folder_parts(record.get('folder', ''))):
+        return None
+    return record['folder']
+
+
+def review_rows(records):
+    """Rows of the window: one per such folder, one per any other document, in the order they came."""
+    records = list(records)
+    by_folder = {}
+    for record in records:
+        key = folder_key(record)
+        if key is not None:
+            by_folder.setdefault(key, []).append(record)
+    rows = []
+    for record in records:
+        key = folder_key(record)
+        members = by_folder.get(key, ()) if key is not None else ()
+        if len(members) > 1:
+            if members[0] is record:
+                rows.append({'id': 'folder:' + key, 'kind': 'folder', 'folder': key, 'records': members,
+                             'documents': [member['id'] for member in members]})
+        else:
+            rows.append({'id': record['id'], 'kind': 'document', 'folder': record.get('folder', ''),
+                         'records': [record], 'documents': [record['id']]})
+    return rows
+
+
+def folder_title(folder):
+    from .analysis import folder_parts
+    parts = folder_parts(folder)
+    return parts[-1] if parts else ''
+
+
+# A whole name with a patronymic: «Тестова Анна Тестовна». Initials give nothing to fill in.
+_WORD = r'[А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?|[А-ЯЁ]{2,}(?:-[А-ЯЁ]{2,})?'
+FOLDER_NAME = re.compile(
+    rf'(?<![А-ЯЁа-яё])((?:{_WORD})\s+(?:{_WORD})\s+(?:[А-ЯЁ][а-яё]*|[А-ЯЁ]+)'
+    r'(?:ОВИЧ|ЕВИЧ|ИЧ|ОВНА|ЕВНА|ИЧНА|ИНИЧНА|ович|евич|ич|овна|евна|ична|инична))(?![А-ЯЁа-яё])')
+FOLDER_DATE = re.compile(r'(?<![\d.])(\d{2})\.(\d{2})\.(\d{4})(?![\d.])')
+
+
+def folder_name_draft(folder):
+    """A draft for the fields from the folder's own name: (name, birth or None), or None.
+
+    Only the window uses it, and only as text a person checks and confirms. Matching never
+    reads folder or file names.
+    """
+    from datetime import date
+    from .analysis import folder_parts
+    for part in reversed(folder_parts(folder)):
+        names = FOLDER_NAME.findall(part)
+        if len(names) != 1:
+            continue
+        birth = None
+        dates = FOLDER_DATE.findall(part)
+        if len(dates) == 1:
+            day, month, year = map(int, dates[0])
+            try:
+                birth = date(year, month, day)
+            except ValueError:
+                birth = None
+            if birth is not None and birth > date.today():
+                birth = None
+        return ' '.join(names[0].split()), birth.isoformat() if birth else None
+    return None

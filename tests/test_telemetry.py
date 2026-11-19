@@ -113,10 +113,10 @@ class DiagnosticsTests(unittest.TestCase):
         other = Diagnostics(self.folder, URL, app_version=VERSION)
         acquire_lock = self.diag._lock
 
-        def revoke_before_lock():
+        def revoke_before_lock(**options):
             self.assertTrue(other.set_consent(False))
             self.assertTrue(other.set_consent(True))
-            return acquire_lock()
+            return acquire_lock(**options)
 
         with patch.object(self.diag, '_lock', side_effect=revoke_before_lock):
             self.assertFalse(self.diag.record_batch({'formats': {'pdf': 10}}, epoch=old_epoch))
@@ -126,8 +126,19 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertTrue(other.record_batch({'formats': {'docx': 2}}, epoch=new_epoch))
         self.assertEqual(other.snapshot()['counters'], {'formats': {'docx': 2}})
 
-    def test_stale_batch_does_not_change_new_version_or_destination_state(self):
-        for endpoint, version in ((URL, '2.5.0'), ('https://second.example.com/v1/counters', VERSION)):
+    def test_batch_of_an_earlier_version_keeps_its_own_counts(self):
+        self.enable()
+        old_epoch = self.diag.consent_epoch()
+        current = Diagnostics(self.folder, URL, app_version='2.5.0')
+        self.assertEqual(current.consent_epoch(), old_epoch)
+        self.assertTrue(current.record_batch({'formats': {'docx': 2}}, epoch=old_epoch))
+        self.assertTrue(self.diag.record_batch({'formats': {'pdf': 10}}, epoch=old_epoch))
+        self.assertEqual(current.snapshot()['counters'], {'formats': {'docx': 2}})
+        self.assertEqual(self.diag.snapshot()['counters'], {'formats': {'pdf': 10}})
+        self.assertEqual(current.queued_versions(), [VERSION, '2.5.0'])
+
+    def test_stale_batch_does_not_change_new_destination_state(self):
+        for endpoint, version in (('https://second.example.com/v1/counters', VERSION),):
             with self.subTest(endpoint=endpoint, version=version), tempfile.TemporaryDirectory() as directory:
                 old = Diagnostics(Path(directory), URL, app_version=VERSION)
                 self.assertTrue(old.set_consent(True))
@@ -170,7 +181,7 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(kwargs['headers'], {'Content-Type': 'application/json',
                                              'User-Agent': 'PatientStudyImporter-Diagnostics'})
         payload = json.loads(kwargs['body'])
-        self.assertEqual(payload, {'schema_version': 1, 'app_version': VERSION, 'counters': {
+        self.assertEqual(payload, {'schema_version': 2, 'app_version': VERSION, 'counters': {
             'formats': {'pdf': 10}, 'outcomes': {'quality_review': 3},
             'review_reasons': {'missing_unit': 2}, 'failure_stages': {'export_locked': 1},
         }})
@@ -189,12 +200,14 @@ class DiagnosticsTests(unittest.TestCase):
             {**good, 'path': CANARY},
             {**good, 'consent': 'true'},
             {**good, 'endpoint': f'{URL}?patient={CANARY}'},
-            {**good, 'app_version': CANARY},
-            {**good, 'counters': {'formats': {CANARY: 10}}},
-            {**good, 'counters': {'formats': {'pdf': True}}},
-            {**good, 'counters': {'formats': {'pdf': MAX_COUNT+1}}},
-            {**good, 'counters': {'formats': {'pdf': [CANARY]}}},
-            {**good, 'counters': {'exception': {'extract': 1}}},
+            {**good, 'queue': {CANARY: {'formats': {'pdf': 10}}}},
+            {**good, 'queue': {VERSION: {'formats': {CANARY: 10}}}},
+            {**good, 'queue': {VERSION: {'formats': {'pdf': True}}}},
+            {**good, 'queue': {VERSION: {'formats': {'pdf': MAX_COUNT+1}}}},
+            {**good, 'queue': {VERSION: {'formats': {'pdf': [CANARY]}}}},
+            {**good, 'queue': {VERSION: {'exception': {'extract': 1}}}},
+            {**good, 'queue': {VERSION: {'errors': {'window.ValueError.gui.' + CANARY + '.1': 1}}}},
+            {**good, 'first_week': CANARY}, {**good, 'session': CANARY}, {**good, 'last_version': CANARY},
         )
         bad = [json.dumps(value) for value in variants]
         bad.append(json.dumps(good).replace('"consent": true', '"consent": false, "consent": true'))
@@ -212,7 +225,7 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertNotIn('exception', self.state.read_text(encoding='utf-8'))
         self.assertFalse(self.diag.enabled)
 
-    def test_version_changes_clear_counts_and_destination_changes_pause(self):
+    def test_version_changes_keep_counts_and_destination_changes_pause(self):
         self.enable()
         self.diag.record('formats', 'pdf', 11)
         new = Diagnostics(self.folder, URL, app_version='2.5.0')
@@ -221,7 +234,8 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertTrue(new.record('formats', 'docx', 11))
         old = Diagnostics(self.folder, URL, app_version='2.4.0')
         self.assertTrue(old.enabled)
-        self.assertIsNone(old.snapshot())
+        self.assertEqual(old.snapshot()['counters'], {'formats': {'pdf': 11}})
+        self.assertEqual(new.queued_versions(), ['2.4.0', '2.5.0'])
         new_host = Diagnostics(self.folder, 'https://second.example.com/v1/counters', app_version=VERSION)
         self.assertFalse(new_host.enabled)
         self.assertFalse(new_host.should_prompt())
@@ -230,29 +244,36 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertFalse(new_host.send_if_due())
             post.assert_not_called()
 
-    def test_scope_change_discards_counts_and_requires_new_consent(self):
+    def test_new_consent_terms_discard_counts_and_ask_again(self):
         self.enable()
         self.diag.record('formats', 'pdf', 10)
-        for key in ('schema_version', 'consent_version'):
+        for key in ('state_version', 'consent_version'):
             with self.subTest(key=key):
                 state = json.loads(self.state.read_text(encoding='utf-8'))
                 state[key] += 1
                 self.state.write_text(json.dumps(state), encoding='utf-8')
                 self.assertFalse(self.diag.enabled)
-                self.assertFalse(self.diag.should_prompt())
+                self.assertTrue(self.diag.should_prompt())
                 self.assertIsNone(self.diag.snapshot())
-                self.assertEqual(json.loads(self.state.read_text(encoding='utf-8'))['counters'], {})
+                self.assertEqual(json.loads(self.state.read_text(encoding='utf-8'))['queue'], {})
                 self.enable()
+                self.diag.record('formats', 'pdf', 10)
 
-    def test_minimum_attempts_timeout_retry_and_daily_throttle(self):
+    def test_everything_goes_daily_without_a_threshold_and_a_failure_keeps_it(self):
         self.enable()
+        self.diag.record('review_outcomes', 'confirmed', 1)
+        now = 1_800_000_000
+        with patch('patient_importer.telemetry.post_report', return_value=True) as post, \
+             patch('patient_importer.telemetry.time.time', return_value=now):
+            self.assertTrue(self.diag.send_if_due())
+        self.assertEqual(json.loads(post.call_args.args[1])['counters'], {'review_outcomes': {'confirmed': 1}})
+        state = json.loads(self.state.read_text(encoding='utf-8'))
+        state['last_attempt'] = 0
+        self.state.write_text(json.dumps(state), encoding='utf-8')
         self.diag.record('outcomes', 'saved', 20)
         self.diag.record('formats', 'pdf', 9)
         with patch('patient_importer.telemetry.post_report', side_effect=[TimeoutError(CANARY), True]) as post:
-            self.assertFalse(self.diag.send_if_due())
-            post.assert_not_called()
             self.diag.record('formats', 'docx')
-            now = 1_800_000_000
             with patch('patient_importer.telemetry.time.time', return_value=now):
                 self.assertFalse(self.diag.send_if_due())
                 self.assertEqual(self.diag.snapshot()['counters']['formats'], {'pdf': 9, 'docx': 1})
@@ -316,7 +337,7 @@ class DiagnosticsTests(unittest.TestCase):
         inactive = Diagnostics(self.folder, '', app_version='2.5.0')
         self.assertFalse(inactive.configured)
         self.assertTrue(inactive.set_consent(False))
-        self.assertEqual(json.loads(self.state.read_text(encoding='utf-8'))['counters'], {})
+        self.assertEqual(json.loads(self.state.read_text(encoding='utf-8'))['queue'], {})
         self.assertFalse(self.diag.enabled)
         self.assertFalse(self.diag.should_prompt())
 
@@ -457,7 +478,7 @@ class AppsScriptTransportTests(unittest.TestCase):
                          ['script.google.com', 'script.googleusercontent.com'])
         args, kwargs = post.request.call_args
         self.assertEqual(args, ('POST', GOOGLE_PATH))
-        self.assertEqual(kwargs['body'], b'{"app_version":"2.4.0","counters":{"formats":{"pdf":10}},"schema_version":1}')
+        self.assertEqual(kwargs['body'], b'{"app_version":"2.4.0","counters":{"formats":{"pdf":10}},"schema_version":2}')
         self.assertEqual(kwargs['headers'], {'Content-Type': 'application/json',
                                              'User-Agent': 'PatientStudyImporter-Diagnostics'})
         post.getresponse.return_value.read.assert_not_called()
@@ -529,10 +550,10 @@ class AppsScriptTransportTests(unittest.TestCase):
 
 class ReportSchemaTests(unittest.TestCase):
     def test_strict_enum_range_and_structure(self):
-        good = {'schema_version': 1, 'app_version': VERSION, 'counters': {'formats': {'pdf': 10}}}
+        good = {'schema_version': 2, 'app_version': VERSION, 'counters': {'formats': {'pdf': 10}}}
         bad = (
             {**good, 'install_id': CANARY}, {**good, 'schema_version': True},
-            {**good, 'schema_version': 2}, {**good, 'app_version': '2.4.0-test'},
+            {**good, 'schema_version': 1}, {**good, 'schema_version': 3}, {**good, 'app_version': '2.4.0-test'},
             {**good, 'app_version': '02.4.0'}, {**good, 'app_version': '２.4.0'},
             {**good, 'counters': {}}, {**good, 'counters': {'formats': {}}},
             {**good, 'counters': {'formats': {'pdf': 0}}},
