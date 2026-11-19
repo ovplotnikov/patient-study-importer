@@ -113,10 +113,10 @@ class DiagnosticsTests(unittest.TestCase):
         other = Diagnostics(self.folder, URL, app_version=VERSION)
         acquire_lock = self.diag._lock
 
-        def revoke_before_lock():
+        def revoke_before_lock(**options):
             self.assertTrue(other.set_consent(False))
             self.assertTrue(other.set_consent(True))
-            return acquire_lock()
+            return acquire_lock(**options)
 
         with patch.object(self.diag, '_lock', side_effect=revoke_before_lock):
             self.assertFalse(self.diag.record_batch({'formats': {'pdf': 10}}, epoch=old_epoch))

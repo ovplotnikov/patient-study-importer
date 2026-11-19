@@ -28,6 +28,9 @@ STATE_VERSION = 2
 SEND_INTERVAL = 86_400
 NETWORK_TIMEOUT = 4
 STATE_LOCK_TIMEOUT = .25
+# Writing counts never happens in the window's thread, so it may wait for another writer's
+# disk flush instead of losing the count. Reads for the window keep the short wait.
+WRITE_LOCK_TIMEOUT = 2
 CONSENT_LOCK_TIMEOUT = 6
 MAX_STATE_BYTES = 96 * 1024
 # Counts of older versions wait for delivery after an update; the oldest go first when full.
@@ -466,7 +469,7 @@ class Diagnostics:
             clean = validate_counters(counters)
             if not clean:
                 return False
-            with self._lock():
+            with self._lock(timeout=WRITE_LOCK_TIMEOUT):
                 state = self._load(expected_epoch=epoch)
                 if state is None or state['consent'] is not True:
                     return False
@@ -509,7 +512,7 @@ class Diagnostics:
         if not self.configured:
             return False
         try:
-            with self._lock():
+            with self._lock(timeout=WRITE_LOCK_TIMEOUT):
                 state = self._load()
                 before = self._serialize(state)
                 added = change(state)

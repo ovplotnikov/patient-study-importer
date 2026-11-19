@@ -95,7 +95,8 @@ class Application:
         self.diagnostics_window=None;self.support_window=None;self.diagnostics_worker=None
         # A failure in a window handler is recorded by its place in the code, then explained to the doctor.
         self.root.report_callback_exception=self.window_failure
-        self.diagnostics.note_start()
+        # Off the window's thread: it may wait for the diagnostics file of another copy of the program.
+        threading.Thread(target=self.diagnostics.note_start,daemon=True).start()
         self.frame=ttk.Frame(self.root,padding=(28,16));self.frame.pack(fill='both',expand=True)
         header=ttk.Frame(self.frame);header.pack(fill='x',pady=(0,12))
         ttk.Label(header,text='Исследования пациентов',font=(ui.FONT,18,'bold')).pack(side='left')
