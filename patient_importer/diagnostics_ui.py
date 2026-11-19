@@ -46,8 +46,8 @@ class DiagnosticsWindow:
         self.on_change = on_change
         self.window = tk.Toplevel(parent)
         self.window.title('Добровольная диагностика')
-        self.window.geometry(f'640x{min(680, parent.winfo_screenheight()-120)}')
         self.window.minsize(520, 480)
+        ui.place_window(self.window, 640, 680)
         self.window.transient(parent)
         self.window.grab_set()
         outer = ttk.Frame(self.window, padding=22)
@@ -137,8 +137,8 @@ class SupportWindow:
         self.address = address
         self.window = tk.Toplevel(parent)
         self.window.title('Помочь с новым бланком')
-        self.window.geometry(f'650x{min(680, parent.winfo_screenheight()-120)}')
         self.window.minsize(540, 480)
+        ui.place_window(self.window, 650, 680)
         self.window.transient(parent)
         self.window.grab_set()
         outer = ttk.Frame(self.window, padding=22)

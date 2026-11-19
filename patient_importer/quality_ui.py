@@ -265,7 +265,7 @@ class ObservationEditor:
     def __init__(self,parent,observation,on_save):
         self.original=deepcopy(observation);self.on_save=on_save;self.fields={}
         self.window=tk.Toplevel(parent);self.window.title('Строка исследования');self.window.configure(bg='white')
-        self.window.geometry('640x660');self.window.minsize(540,490);self.window.transient(parent);self.window.grab_set()
+        self.window.minsize(540,490);ui.place_window(self.window,640,660);self.window.transient(parent);self.window.grab_set()
         self.window.protocol('WM_DELETE_WINDOW',self.close)
         outer=ttk.Frame(self.window,padding=20);outer.pack(fill='both',expand=True)
         ttk.Label(outer,text='Сверьте строку с оригиналом',style='Heading.TLabel').pack(anchor='w',pady=(0,8))
@@ -311,8 +311,7 @@ class QualityReviewWindow:
         self.window=tk.Toplevel(parent);self.window.title('Проверка данных');self.window.configure(bg='white')
         self.actions=actions or ui.WorkspaceActions(self.window);self.saving=False
         self.window.protocol('WM_DELETE_WINDOW',self.close)
-        self.window.geometry(f'{min(1240,parent.winfo_screenwidth()-50)}x{min(850,parent.winfo_screenheight()-130)}+25+25')
-        self.window.minsize(900,650);self.window.transient(parent);self.window.grab_set()
+        self.window.minsize(900,650);ui.place_window(self.window,1240,850);self.window.transient(parent);self.window.grab_set()
         outer=ttk.Frame(self.window,padding=18);outer.pack(fill='both',expand=True)
         self.head=ttk.Frame(outer);self.head.pack(fill='x')
         self.title=ttk.Label(self.head,text='Сверьте данные с оригиналом',style='Heading.TLabel');self.title.pack(side='left')
@@ -925,7 +924,7 @@ class QualityReviewWindow:
 
     def edit_sections(self):
         if self.saving:return
-        window=tk.Toplevel(self.window);self.sections_window=window;window.title('Текст исследования');window.configure(bg='white');window.geometry('900x680');window.transient(self.window);window.grab_set()
+        window=tk.Toplevel(self.window);self.sections_window=window;window.title('Текст исследования');window.configure(bg='white');ui.place_window(window,900,680);window.transient(self.window);window.grab_set()
         outer=ttk.Frame(window,padding=18);outer.pack(fill='both',expand=True)
         ttk.Label(outer,text='Сверьте текст с оригиналом',style='Heading.TLabel').pack(anchor='w',pady=(0,10))
         buttons=ttk.Frame(outer);buttons.pack(side='bottom',fill='x',pady=(10,0))
@@ -963,7 +962,7 @@ class QualityReviewWindow:
         self.show_text_columns('Варианты распознавания — сверьте с оригиналом',[('Использовано для черновика',primary),('Независимое чтение',alternatives)])
 
     def show_text_columns(self,title,columns):
-        window=tk.Toplevel(self.window);window.title(title);window.configure(bg='white');window.geometry('1000x680');window.transient(self.window);window.grab_set()
+        window=tk.Toplevel(self.window);window.title(title);window.configure(bg='white');ui.place_window(window,1000,680);window.transient(self.window);window.grab_set()
         outer=ttk.Frame(window,padding=18);outer.pack(fill='both',expand=True)
         ttk.Label(outer,text=title,font=(ui.FONT,14,'bold'),wraplength=900).pack(anchor='w',pady=(0,12))
         panes=ttk.Panedwindow(outer,orient='horizontal');panes.pack(fill='both',expand=True)
@@ -982,7 +981,7 @@ class DuplicateWindow:
         self.workspace=workspace;self.record=record;self.target=target;self.on_done=on_done
         self.window=tk.Toplevel(parent);self.window.title('Сравнение документов');self.window.configure(bg='white')
         self.actions=actions or ui.WorkspaceActions(self.window)
-        self.window.geometry('1150x760');self.window.transient(parent);self.window.grab_set()
+        ui.place_window(self.window,1150,760);self.window.transient(parent);self.window.grab_set()
         self.window.protocol('WM_DELETE_WINDOW',self.close)
         outer=ttk.Frame(self.window,padding=18);outer.pack(fill='both',expand=True)
         ttk.Label(outer,text='Одинаковые исследования или разные результаты?',style='Heading.TLabel').pack(anchor='w',pady=(0,12))
@@ -1026,7 +1025,7 @@ class PatientDialog:
     def __init__(self,parent,record,on_save):
         self.record=record;self.on_save=on_save
         self.window=tk.Toplevel(parent);self.window.title('Сменить пациента');self.window.configure(bg='white')
-        self.window.geometry('520x330');self.window.transient(parent);self.window.grab_set()
+        ui.place_window(self.window,520,330);self.window.transient(parent);self.window.grab_set()
         self.window.protocol('WM_DELETE_WINDOW',self.close)
         outer=ttk.Frame(self.window,padding=20);outer.pack(fill='both',expand=True)
         ttk.Label(outer,text=record.get('filename',''),style='Heading.TLabel',wraplength=470).pack(anchor='w')
@@ -1062,7 +1061,7 @@ class HistoryWindow:
         self.workspace=workspace;self.on_change=on_change;self.icons=icons;self.candidate=None
         self.window=tk.Toplevel(parent);self.window.title('Все исследования');self.window.configure(bg='white')
         self.actions=actions or ui.WorkspaceActions(self.window)
-        self.window.geometry('1040x700');self.window.minsize(850,600);self.window.transient(parent);self.window.grab_set();self.window.protocol('WM_DELETE_WINDOW',self.close)
+        self.window.minsize(850,600);ui.place_window(self.window,1040,700);self.window.transient(parent);self.window.grab_set();self.window.protocol('WM_DELETE_WINDOW',self.close)
         outer=ttk.Frame(self.window,padding=22);outer.pack(fill='both',expand=True)
         ttk.Label(outer,text='Все исследования',style='Heading.TLabel').pack(anchor='w')
         self.status=tk.StringVar(value='Оригиналы и предыдущие результаты сохраняются.')
@@ -1131,7 +1130,7 @@ class HistoryWindow:
             self.status.set('Повторно читаем сохранённый оригинал… Это может занять несколько минут.')
 
     def show_candidate(self,candidate):
-        self.candidate=candidate;win=tk.Toplevel(self.window);self.candidate_window=win;win.title('Результат повторного распознавания');win.configure(bg='white');win.geometry('1100x700');win.transient(self.window);win.grab_set();win.protocol('WM_DELETE_WINDOW',self.close_candidate)
+        self.candidate=candidate;win=tk.Toplevel(self.window);self.candidate_window=win;win.title('Результат повторного распознавания');win.configure(bg='white');ui.place_window(win,1100,700);win.transient(self.window);win.grab_set();win.protocol('WM_DELETE_WINDOW',self.close_candidate)
         outer=ttk.Frame(win,padding=20);outer.pack(fill='both',expand=True)
         ttk.Label(outer,text='Сравните перед применением',style='Heading.TLabel').pack(anchor='w',pady=(0,10))
         info='Подтверждённые вручную поля сохранены. '+ '; '.join(candidate.get('protected_fields',[])) if candidate.get('protected_fields') else 'Предыдущий результат останется в истории. Новый результат пройдёт проверки.'

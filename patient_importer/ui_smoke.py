@@ -77,6 +77,19 @@ def run(root):
         assert button.winfo_ismapped(),str(button)
         assert button.winfo_rooty()+button.winfo_height()<=window.winfo_rooty()+window.winfo_height(),button.cget('text')
         assert button.winfo_rootx()+button.winfo_width()<=window.winfo_rootx()+window.winfo_width(),button.cget('text')
+    def on_screen(*widgets):
+        """All of each widget lies in the work area of the screen: no taskbar or screen edge over it.
+
+        Being inside its window is not enough: the window itself can reach under the taskbar.
+        """
+        settle()
+        for widget in widgets:
+            x,y,width,height=ui.work_area(widget)
+            left,top=widget.winfo_rootx(),widget.winfo_rooty()
+            assert widget.winfo_ismapped(),str(widget)
+            assert (left>=x and top>=y and left+widget.winfo_width()<=x+width
+                    and top+widget.winfo_height()<=y+height),(widget.cget('text'),(left,top,widget.winfo_width(),widget.winfo_height()),(x,y,width,height))
+            assert ui.in_work_area(widget.winfo_toplevel()),('Window outside the work area',widget.winfo_toplevel().title())
     def capture(name,window=None):
         window=window or app.root
         window.lift();window.focus_force();settle()
@@ -139,6 +152,11 @@ def run(root):
     assert 'Скан' in review.location_text.get() and 'Исследование.png' in review.location_text.get()
     assert review.location['path']==third.resolve(),'The window must open the file the doctor added'
     for button in (review.confirm_button,review.original_button,review.reveal_button):visible(button)
+    on_screen(review.confirm_button,review.original_button,review.reveal_button)
+    # A long reason may not fit its column; its whole text is shown under the list.
+    reason=review.row_values(review.rows[review.selected])[2]
+    assert review.reason_text.get()=='Что проверить: '+reason and review.reason_label.winfo_ismapped()
+    on_screen(review.reason_label)
     capture('03-review.png',review.window)
     review.window.state('normal')
     for size in ('960x680','850x620'):
@@ -216,6 +234,7 @@ def run(root):
     quality=app.review_window
     assert quality.selected and str(quality.confirm_button['state'])=='disabled'
     visible(quality.confirm_button);visible(quality.attest)
+    on_screen(quality.confirm_button,quality.attest)
     capture('07-quality-review.png',quality.window)
     quality.window.geometry('900x650');settle();visible(quality.confirm_button);visible(quality.attest)
     capture('quality-small-window.png',quality.window)
@@ -318,6 +337,7 @@ def run(root):
     assert all(any(line in text for text in texts) for line in SENT),'Every new group is described'
     assert any('спрашивает снова' in text for text in texts)
     assert json.loads(dialog.example.get('1.0','end'))==EXAMPLE_REPORT and validate_report(EXAMPLE_REPORT)
+    on_screen(dialog.allow_button,dialog.decline_button)
     capture('11-diagnostics.png',dialog.window)
     dialog.allow_button.invoke()
     deadline=time.monotonic()+10
@@ -356,12 +376,16 @@ def run(root):
     app.root.report_callback_exception=lambda typ,value,tb:errors.append(str(value))
     settle();visible(app.start_button);visible(app.add_button)
     dialog=DiagnosticsWindow(app.root,test_diagnostics,diagnostics_example)
-    settle();visible(dialog.allow_button);visible(dialog.decline_button)
+    settle();visible(dialog.allow_button);visible(dialog.decline_button);on_screen(dialog.allow_button,dialog.decline_button)
     capture('diagnostics-150-percent.png',dialog.window);dialog.window.destroy()
     dialog=SupportWindow(app.root,support_email);settle()
     visible(dialog.mail_button);visible(dialog.attest)
     capture('template-help-150-percent.png',dialog.window);dialog.window.destroy()
     app.stage([first,third]);finish();app.start();finish();app.review();settle()
+    on_screen(app.review_window.confirm_button)
+    # At 150 % the whole label of the button still fits on it.
+    button=app.review_window.confirm_button
+    assert button.winfo_reqwidth()<=button.winfo_width(),('Button text cut',button.winfo_reqwidth(),button.winfo_width())
     capture('review-150-percent.png',app.review_window.window)
     visible(app.review_window.confirm_button)
     candidate=app.review_window.candidate_area.winfo_children()[1].winfo_children()[0]
@@ -375,6 +399,7 @@ def run(root):
     app.review_window.name_entry.event_generate('<Return>');finish()
     assert not app.review_window.records,'Enter did not confirm the patient'
     app.review_window.next_button.invoke();settle()
+    on_screen(app.review_window.confirm_button,app.review_window.attest)
     capture('quality-150-percent.png',app.review_window.window)
     visible(app.review_window.confirm_button);visible(app.review_window.attest)
     app.review_window.window.destroy();app.show_documents();capture('main-150-percent.png')
@@ -411,7 +436,7 @@ def run(root):
     app.stage([queued]);finish();app.start();finish();app.review();settle()
     quality=app.review_window
     assert not quality.full_mode and quality.current['kind']=='row'
-    visible(quality.accept_button);capture('06-queue.png',quality.window)
+    visible(quality.accept_button);on_screen(quality.accept_button);capture('06-queue.png',quality.window)
     quality.window.geometry('900x650');settle();visible(quality.accept_button);visible(quality.whole_button)
     capture('queue-small-window.png',quality.window)
     quality.vars['unit'].set('мкмоль/л');quality.accept_button.invoke()

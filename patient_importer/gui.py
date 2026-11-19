@@ -56,14 +56,8 @@ def reveal_path(path):
 
 
 def maximize(window):
-    """As large as the screen allows: the page in the preview must be readable."""
-    for attempt in (lambda:window.state('zoomed'),lambda:window.attributes('-zoomed',True)):
-        try:
-            attempt();window.update_idletasks()
-            if window.state()=='zoomed' or window.winfo_width()>=window.winfo_screenwidth()-40:return
-        except tk.TclError:pass
-    # Some window managers ignore a zoom request for a dialog: take the screen by size.
-    window.geometry(f'{window.winfo_screenwidth()-20}x{window.winfo_screenheight()-80}+10+10')
+    """As large as the work area allows, taskbar excluded: the page in the preview must be readable."""
+    ui.place_window(window,maximize=True)
 
 
 class Application:
@@ -78,8 +72,7 @@ class Application:
         else:self.root=tk.Tk()
         if tk_scaling is not None:self.root.tk.call('tk','scaling',tk_scaling)
         self.root.title('Исследования пациентов')
-        self.root.geometry(f'{min(1100,self.root.winfo_screenwidth()-50)}x{min(800,self.root.winfo_screenheight()-130)}+20+20')
-        self.root.minsize(850,620);ui.setup(self.root);self.icons=ui.Icons(self.root)
+        self.root.minsize(850,620);ui.place_window(self.root,1100,800);ui.setup(self.root);self.icons=ui.Icons(self.root)
         self.events=queue.Queue();self.worker=None;self.cancel=threading.Event();self.closing=False
         self.updating=False;self.update_cancel=threading.Event();self.pending_update=None;self.update_prompt_active=False
         self.working=False;self.reparsing=False;self.screen='documents';self.batch=[];self.paths=[]
@@ -735,13 +728,20 @@ class ReviewWindow:
         self.window.bind('<Configure>',lambda e:self.title.configure(wraplength=max(400,e.width-40)) if e.widget is self.window else None)
         self.list_frame=ttk.Frame(outer);list_frame=self.list_frame;list_frame.pack(fill='x')
         self.list=ttk.Treeview(list_frame,columns=('file','folder','reason'),show='headings',height=3,selectmode='browse')
-        for key,title,width in (('file','Документ',240),('folder','Папка',220),('reason','Что проверить',300)):
-            self.list.heading(key,text=title);self.list.column(key,width=width,minwidth=80,stretch=True)
+        # The reason is the longest text: it takes the spare width, and its full text shows below the list.
+        for key,title,width,stretch in (('file','Документ',220,False),('folder','Папка',160,False),('reason','Что проверить',420,True)):
+            self.list.heading(key,text=title);self.list.column(key,width=width,minwidth=80,stretch=stretch)
         list_scroll=ttk.Scrollbar(list_frame,orient='vertical',command=self.list.yview)
         self.list.configure(yscrollcommand=list_scroll.set)
         list_scroll.pack(side='right',fill='y');self.list.pack(side='left',fill='x',expand=True);self.list.bind('<<TreeviewSelect>>',self.load)
+        self.reason_text=tk.StringVar()
+        self.reason_label=ttk.Label(outer,textvariable=self.reason_text,style='Muted.TLabel',justify='left')
+        self.reason_label.pack(anchor='w',fill='x',pady=(4,0))
+        self.window.bind('<Configure>',lambda e:self.reason_label.configure(wraplength=max(300,e.width-40)) if e.widget is self.window else None,add='+')
         self.panes=ttk.Panedwindow(outer,orient='horizontal');self.panes.pack(fill='both',expand=True,pady=(10,0))
-        self.left=ttk.Frame(self.panes);self.right=ttk.Frame(self.panes,padding=(16,0,0,0),width=self.RIGHT_WIDTH)
+        # The fields keep their width as text grows: at 150 % the button's words still fit.
+        self.right_width=int(self.RIGHT_WIDTH*ui.text_scale(self.window))
+        self.left=ttk.Frame(self.panes);self.right=ttk.Frame(self.panes,padding=(16,0,0,0),width=self.right_width)
         self.right.pack_propagate(False)
         # The page needs the room: the fields keep a fixed width, the preview takes the rest.
         self.panes.add(self.left,weight=1);self.panes.add(self.right,weight=0)
@@ -803,7 +803,7 @@ class ReviewWindow:
         self.fill()
 
     def wrap(self,label):
-        self.wrapping.append(label);label.configure(wraplength=self.RIGHT_WIDTH-40)
+        self.wrapping.append(label);label.configure(wraplength=self.right_width-40)
         return label
 
     def right_resized(self,event):
@@ -861,7 +861,7 @@ class ReviewWindow:
                 self.success_message.configure(text='Документы с пометками уже в таблице. Сверить их с оригиналами можно сейчас или позже')
                 self.next_button.configure(text='Сверить данные',command=self.next_review)
                 self.later_button.pack()
-            self.list_frame.pack_forget();self.panes.pack_forget();self.title.pack_forget();self.bulk_button.pack_forget();self.success.pack(fill='both',expand=True)
+            self.list_frame.pack_forget();self.reason_label.pack_forget();self.panes.pack_forget();self.title.pack_forget();self.bulk_button.pack_forget();self.success.pack(fill='both',expand=True)
 
     @staticmethod
     def row_values(row):
@@ -907,6 +907,7 @@ class ReviewWindow:
         if not selection or selection[0] not in self.rows:return
         if selection[0]==self.selected:return
         self.selected=selection[0];row=self.rows[self.selected];record=row['records'][0]
+        self.reason_text.set('Что проверить: '+self.row_values(row)[2])
         document=self.workspace.document(record['id']);analysis=json.loads(document['analysis'])
         suggestion=review_queue.patient_suggestion(record)
         found=suggestion[0] if suggestion else (None,None)
@@ -1113,7 +1114,7 @@ class BulkPatientDialog:
     def __init__(self,parent,groups,on_save):
         self.groups=groups;self.on_save=on_save
         self.window=tk.Toplevel(parent);self.window.title('Подтвердить пациентов списком');self.window.configure(bg='white')
-        self.window.geometry('860x520');self.window.minsize(640,380);self.window.transient(parent);self.window.grab_set()
+        self.window.minsize(640,380);ui.place_window(self.window,860,520);self.window.transient(parent);self.window.grab_set()
         self.window.protocol('WM_DELETE_WINDOW',self.close)
         outer=ttk.Frame(self.window,padding=20);outer.pack(fill='both',expand=True)
         ttk.Label(outer,text='Подтвердите пациентов, найденных в документах',style='Heading.TLabel').pack(anchor='w')
@@ -1157,7 +1158,7 @@ class ProblemsWindow:
     def __init__(self,parent,workspace,icons,on_retry):
         self.workspace=workspace;self.on_retry=on_retry
         self.window=tk.Toplevel(parent);self.window.title('Файлы, требующие внимания');self.window.configure(bg='white')
-        self.window.geometry('850x580');self.window.transient(parent);self.window.grab_set()
+        ui.place_window(self.window,850,580);self.window.transient(parent);self.window.grab_set()
         outer=ttk.Frame(self.window,padding=22);outer.pack(fill='both',expand=True)
         ttk.Label(outer,text='Разберём проблемные файлы',style='Heading.TLabel').pack(anchor='w',pady=(0,16))
         self.area=ui.ScrollArea(outer);self.area.pack(fill='both',expand=True)
