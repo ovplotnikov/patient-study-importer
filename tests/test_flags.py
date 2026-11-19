@@ -130,6 +130,16 @@ class FlagTests(unittest.TestCase):
         with reopened.connect() as db:
             self.assertEqual(db.execute("SELECT value FROM meta WHERE key='filing_rule'").fetchone()[0], FILING_RULE)
 
+    def test_a_file_outside_the_work_folder_never_keeps_it_from_opening(self):
+        self.add('без единицы.txt', UNIT_MISSING)
+        with self.workspace.connect() as db, db:
+            db.execute("UPDATE arrivals SET source='архив/вне.txt', destination=NULL, category='Нужно уточнить', status='done'")
+            db.execute("DELETE FROM meta WHERE key='filing_rule'")
+        reopened = Workspace(self.root)
+        problem, = reopened.problems()
+        self.assertIn('вне рабочей папки', problem['error'])
+        self.assertEqual(reopened.summary()['pending_moves'], 1)
+
     def test_refiling_runs_once(self):
         self.add('без единицы.txt', UNIT_MISSING)
         with patch.object(Workspace, 'finish_moves') as moves:

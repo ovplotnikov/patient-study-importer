@@ -69,7 +69,8 @@ def measure(variant, attempts):
             finished = perf_counter()
             transport.assert_not_called()
 
-        expected = {'schema_version': 1, 'app_version': TEST_VERSION,
+        # 2.6 sends the same counters as wire schema 2. Parity covers what is counted.
+        expected = {'schema_version': 1 if variant == 'baseline' else 2, 'app_version': TEST_VERSION,
                     'counters': {'formats': {'pdf': attempts}, 'outcomes': {'saved': attempts}}}
         snapshot = diagnostics.snapshot()
         require(snapshot == expected, 'Diagnostics payload differs from the expected wire contract')
@@ -78,7 +79,8 @@ def measure(variant, attempts):
                 'Unexpected diagnostics state write count')
         require(calls['state_reads'] == attempts + writes and calls['fsync_calls'] >= writes,
                 'Unexpected diagnostics reads or disk flush count')
-        fingerprint = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode('ascii')).hexdigest()
+        counted = {key: snapshot[key] for key in ('app_version', 'counters')}
+        fingerprint = hashlib.sha256(json.dumps(counted, sort_keys=True).encode('ascii')).hexdigest()
     return {'seconds': {'consent_checks': captured - started, 'record_counters': finished - captured,
                         'total': finished - started},
             'counts': dict(calls), 'payload_sha256': fingerprint}

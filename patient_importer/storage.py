@@ -102,8 +102,12 @@ class Workspace:
                 for row in db.execute('SELECT id,source,destination FROM arrivals').fetchall():
                     db.execute('UPDATE arrivals SET source=?,destination=? WHERE id=?',(relocate(row['source']),relocate(row['destination']),row['id']))
             db.execute('INSERT OR REPLACE INTO meta VALUES (?,?)',('root',str(self.root)))
-            if self._apply_filing_rule(db):
-                self.finish_moves(db,lambda **state:None)
+            # Refiling must never keep a work folder from opening: a file that cannot move waits.
+            try:
+                if self._apply_filing_rule(db):
+                    self.finish_moves(db,lambda **state:None)
+            except Exception:
+                pass
 
     @contextmanager
     def connect(self):
@@ -499,7 +503,13 @@ class Workspace:
         attempt_epochs = getattr(self._diagnostic_local, 'attempt_epochs', None) or {}
         for row in db.execute("SELECT * FROM arrivals WHERE status='pending' ORDER BY id").fetchall():
             epoch = attempt_epochs.get(row['source'], _CURRENT_EPOCH)
-            source=Path(row['source']);target=Path(row['destination']) if row['destination'] else self.destination(row)
+            source=Path(row['source'])
+            try:target=Path(row['destination']) if row['destination'] else self.destination(row)
+            except ValueError:
+                # A path outside this work folder cannot be filed here. It waits, as any failed move.
+                self._diagnostic('failure_stages', 'archive', epoch=epoch)
+                with db:db.execute('UPDATE arrivals SET error=? WHERE id=?',('Файл находится вне рабочей папки. Перенесите его вручную.',row['id']))
+                continue
             with db:db.execute('UPDATE arrivals SET destination=? WHERE id=?',(str(target),row['id']))
             try:
                 target.parent.mkdir(parents=True,exist_ok=True)
