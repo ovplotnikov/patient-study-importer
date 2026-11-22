@@ -141,7 +141,8 @@ SUMMARY_GROUPS = (
     ('Сцинтиграфия', 'Дата сцинтиграфии (посл.)', ('Заключение',)),
     ('МРТ', 'Дата МРТ (посл.)', ('Заключение',)),
 )
-DRAFT_STATUSES = frozenset({'Проверить данные', 'Уточнить пациента'})
+UNVERIFIED = 'Не сверено'
+SCAN = 'со скана'
 
 
 def row_id(*pieces):
@@ -225,7 +226,20 @@ def put(values, column, value):
 
 
 def base_row(study, sheet, day):
-    return {'sheet': sheet, 'study': study, 'date': day, 'values': {}, 'units': {}}
+    return {'sheet': sheet, 'study': study, 'date': day, 'values': {}, 'units': {}, 'scan': False}
+
+
+def verified(row):
+    return row['study'].get('verified', True)
+
+
+def row_status(row):
+    """A study's status, with «со скана» only on the rows whose values were read from a scan."""
+    study = row['study']
+    if verified(row):
+        return study['status']
+    reasons = ([SCAN] if row['scan'] else []) + list(study.get('flags', ()))
+    return UNVERIFIED + (' · ' + ', '.join(reasons) if reasons else '')
 
 
 def lab_rows(study):
@@ -242,6 +256,7 @@ def lab_rows(study):
             if item.get('unit'):
                 row['units'][column] = item['unit']
         put(row['values'], column, cell_value(item))
+        row['scan'] |= bool(item.get('from_ocr'))
     return list(rows.values())
 
 
@@ -257,9 +272,14 @@ def report_rows(study):
                 row = rows.setdefault(day, base_row(study, sheet, day))
                 text = ' '.join(filter(None, (str(item.get('result', '')), item.get('unit', ''))))
                 row['values'][column] = f"{row['values'][column]}; {text}" if column in row['values'] else text
+                row['scan'] |= bool(item.get('from_ocr'))
     conclusion = conclusion_of(study)
     if conclusion:
         rows[study['date']]['values']['Заключение'] = conclusion
+        ocr_pages = study.get('ocr_pages', ())
+        rows[study['date']]['scan'] |= study.get('scan_text', False) and any(
+            section.get('page_index', section.get('page')) in ocr_pages for section in study['sections']
+            if section.get('section', '').lower().startswith('заключение'))
     return [row for row in rows.values() if row['values']]
 
 
@@ -277,7 +297,7 @@ def identity_cells(row, sheet):
     number = row['number']
     # No date in the identifier: correcting a date must not detach the notes on the row.
     return [row_id('clinical', sheet, study['id'], number), study['name'], study['birth'],
-            row['date'], years, months, study['status']]
+            row['date'], years, months, row_status(row)]
 
 
 def merge_unitless_columns(rows, fixed):
@@ -361,9 +381,9 @@ def summary_sheet(grouped):
             labels.append((sheet, column))
     table = []
     for patient_id, study in sorted(patients.items(), key=lambda pair: pair[1]['name']):
-        used = [latest[patient_id, sheet] for sheet, _date, _columns in SUMMARY_GROUPS if (patient_id, sheet) in latest]
-        draft = any(row['study']['status'] in DRAFT_STATUSES for row in used)
-        cells = [row_id('summary', patient_id), study['name'], study['birth'], 'Да' if draft else 'Нет']
+        used = [(sheet, latest[patient_id, sheet]) for sheet, _date, _columns in SUMMARY_GROUPS if (patient_id, sheet) in latest]
+        draft = [f'{sheet} ({SCAN})' if row['scan'] else sheet for sheet, row in used if not verified(row)]
+        cells = [row_id('summary', patient_id), study['name'], study['birth'], 'Да: ' + ', '.join(draft) if draft else 'Нет']
         for sheet, column in labels:
             row = latest.get((patient_id, sheet))
             cells.append(None if row is None else row['date'] if column is None else row['values'].get(column))
@@ -382,17 +402,32 @@ def dynamics_sheet(grouped):
                 continue
             for column, value in row['values'].items():
                 if isinstance(value, (int, float)) and not isinstance(value, bool):
-                    series[row['study']['patient_id'], row['study']['name'], sheet, column].append((row['date'], value))
-    usable = {key: sorted(points) for key, points in series.items() if len({day for day, _value in points}) >= 2}
-    years = sorted({day[:4] for points in usable.values() for day, _value in points})
+                    series[row['study']['patient_id'], row['study']['name'], sheet, column].append(
+                        (row['date'], value, not verified(row), row['scan'] and not verified(row)))
+    usable = {key: sorted(points, key=lambda point: point[0]) for key, points in series.items()
+              if len({point[0] for point in points}) >= 2}
+    years = sorted({point[0][:4] for points in usable.values() for point in points})
     headers = ['RowID', 'Пациент', 'Вид анализа', 'Показатель', 'Измерений', 'Первая дата', 'Первое значение',
-               'Последняя дата', 'Последнее значение'] + years
+               'Последняя дата', 'Последнее значение', 'Несверенные значения'] + years
     table = []
     for (patient_id, name, sheet, column), points in sorted(usable.items(), key=lambda pair: pair[0][1:]):
-        by_year = {day[:4]: value for day, value in points}  # Sorted, so the last of a year stays.
+        by_year = {point[0][:4]: point[1] for point in points}  # Sorted, so the last of a year stays.
         table.append([row_id('dynamics', patient_id, sheet, column), name, sheet, column, len(points), points[0][0],
-                      points[0][1], points[-1][0], points[-1][1]] + [by_year.get(year) for year in years])
+                      points[0][1], points[-1][0], points[-1][1], unverified_points(points)]
+                     + [by_year.get(year) for year in years])
     return headers, table, ('Первая дата', 'Последняя дата')
+
+
+def unverified_points(points):
+    """How many values of a series are not checked yet, and whether the latest is one of them."""
+    unchecked = sum(point[2] for point in points)
+    if not unchecked:
+        return None
+    scanned = sum(point[3] for point in points)
+    text = f'{unchecked} из {len(points)}' + (f', {SCAN}: {scanned}' if scanned else '')
+    if points[-1][2]:
+        text += '; последнее не сверено' + (f' ({SCAN})' if points[-1][3] else '')
+    return text
 
 
 SHEET_ORDER = ('Свод', 'Динамика', *LAB_SHEETS, *REPORT_SHEETS.values())

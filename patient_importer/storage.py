@@ -13,14 +13,19 @@ import uuid
 
 import portalocker
 
-from . import analysis, extraction, parallel, quality, reading
-from .telemetry_schema import MAX_COUNT, METRICS
+import time
+
+from . import analysis, diagnostic_events, extraction, parallel, quality, reading
+from .telemetry_schema import MAX_COUNT, failure_code, seconds_bucket, valid_code
 
 KEEP_NEWEST_BACKUPS=20
 KEEP_DAILY_BACKUPS=14
 # Reading a scan loads the OCR engine, about 300 MB per process.
 IMPORT_MEMORY_PER_WORKER=400*1024*1024
 MANAGED={'Обработано','Нужно уточнить','Дубли','Ошибки','База','Резервные копии','Отложено'}
+# Which documents wait in «Нужно уточнить». Since this rule only an unknown patient keeps one
+# there: quality flags no longer do. A workspace filed by an earlier rule is refiled once.
+FILING_RULE='patient-only'
 # None is a captured absence of consent, not a request to capture it again.
 _CURRENT_EPOCH = object()
 DIAGNOSTIC_FORMATS = {
@@ -71,6 +76,10 @@ class Workspace:
                     category TEXT NOT NULL,destination TEXT,status TEXT NOT NULL DEFAULT 'pending',error TEXT NOT NULL DEFAULT '',
                     created TEXT NOT NULL,UNIQUE(source,hash));
                 CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY,time TEXT NOT NULL,kind TEXT NOT NULL,detail TEXT NOT NULL);
+                -- Where a file was added from, so the window can open it under the name the doctor gave it.
+                -- Added in place: earlier versions ignore it. Stays on this computer: never in the table or diagnostics.
+                CREATE TABLE IF NOT EXISTS external_sources (
+                    hash TEXT NOT NULL, path TEXT NOT NULL, created TEXT NOT NULL, PRIMARY KEY(hash,path));
                 CREATE TABLE IF NOT EXISTS study_history (
                     id INTEGER PRIMARY KEY, document_id TEXT NOT NULL REFERENCES documents(id),
                     created TEXT NOT NULL, action TEXT NOT NULL, analysis TEXT NOT NULL,
@@ -93,6 +102,12 @@ class Workspace:
                 for row in db.execute('SELECT id,source,destination FROM arrivals').fetchall():
                     db.execute('UPDATE arrivals SET source=?,destination=? WHERE id=?',(relocate(row['source']),relocate(row['destination']),row['id']))
             db.execute('INSERT OR REPLACE INTO meta VALUES (?,?)',('root',str(self.root)))
+            # Refiling must never keep a work folder from opening: a file that cannot move waits.
+            try:
+                if self._apply_filing_rule(db):
+                    self.finish_moves(db,lambda **state:None)
+            except Exception:
+                pass
 
     @contextmanager
     def connect(self):
@@ -128,8 +143,7 @@ class Workspace:
         if self.diagnostics is None:
             return
         try:
-            if (type(metric) is not str or type(code) is not str or code not in METRICS.get(metric, ())
-                    or type(count) is not int or not 1 <= count <= MAX_COUNT):
+            if not valid_code(metric, code) or type(count) is not int or not 1 <= count <= MAX_COUNT:
                 return
             if epoch is _CURRENT_EPOCH:
                 epoch = self._diagnostic_epoch()
@@ -193,9 +207,32 @@ class Workspace:
             self._diagnostic('failure_stages', stage, epoch=epoch)
             raise
 
-    def _diagnostic_document(self, record, parsed, *, epoch):
+    def _diagnostic_counters(self, counters, *, epoch=_CURRENT_EPOCH):
+        for metric, codes in counters.items():
+            for code, count in codes.items():
+                self._diagnostic(metric, code, count, epoch=epoch)
+
+    def _diagnostic_failure(self, stage, exc, *, epoch=_CURRENT_EPOCH):
+        """Where the program failed, by stage, exception class and code place. Never the message."""
+        try:
+            self._diagnostic('errors', failure_code(stage, exc), epoch=epoch)
+        except Exception:
+            pass
+
+    def _diagnostic_document(self, record, parsed, *, epoch, outcome=None, attempt=None):
         if epoch is None:
             return
+        try:
+            if outcome:
+                extracted = json.loads(record['extracted']) if 'extracted' in record.keys() else {}
+                self._diagnostic_counters(diagnostic_events.reading_codes(
+                    dict(record), parsed, outcome, extracted.get('extraction_issues', ())), epoch=epoch)
+                seconds = (attempt or {}).get('seconds')
+                if type(seconds) in (int, float) and seconds >= 0:
+                    kind = 'scan' if parsed.get('ocr_pages') else 'text'
+                    self._diagnostic('speed', f'{kind}.{seconds_bucket(seconds)}', epoch=epoch)
+        except Exception:
+            pass
         try:
             codes = {issue['code'] for issue in quality.issues(parsed) if type(issue.get('code')) is str}
             if not record['patient_id']:
@@ -213,8 +250,10 @@ class Workspace:
     def _export_workbook(self, db):
         from .workbook import export_workbook
         epoch = self._diagnostic_epoch()
+        started = time.monotonic()
         try:
             export_workbook(self, db)
+            self._diagnostic('speed', 'export.' + seconds_bucket(time.monotonic() - started), epoch=epoch)
         except Exception as exc:
             # Check exception types and a known local lock indicator. Exception
             # messages can contain patient details and are never sent to the sink.
@@ -226,6 +265,10 @@ class Workspace:
             except OSError:
                 pass
             self._diagnostic('failure_stages', stage, epoch=epoch)
+            if stage == 'export_locked':
+                self._diagnostic('errors', 'export_locked', epoch=epoch)
+            else:
+                self._diagnostic_failure('export', exc, epoch=epoch)
             raise
 
     def files(self):
@@ -262,6 +305,13 @@ class Workspace:
             temporary.unlink(missing_ok=True)
         return target
 
+    def _learn_folder(self,db,document_id,path):
+        """A document first loaded from a pile learns its patient folder when it is added again from one."""
+        folder=str(path.parent.relative_to(self.root))
+        known=db.execute('SELECT folder FROM documents WHERE id=?',(document_id,)).fetchone()['folder']
+        if analysis.folder_parts(folder) and not analysis.folder_parts(known):
+            db.execute('UPDATE documents SET folder=? WHERE id=?',(folder,document_id))
+
     def add_file(self,db,path,diagnostic_attempt=None,prepared=None):
         """Store one file. `prepared` is a reading made ahead in a worker; it is used
         only when the file still has the hash it was read with."""
@@ -281,12 +331,15 @@ class Workspace:
         duplicate=bool(match)
         if match:
             document_id=match['id']
+            self._learn_folder(db,document_id,path)
         else:
             ahead=prepared.get('reading') if prepared and prepared['digest']==digest else None
             original=prepared['original'] if ahead else self.preserve(path,digest)
             attempt['stage'] = 'extraction'
+            started=time.monotonic()
+            if ahead is not None and type(ahead.get('seconds')) in (int,float):attempt['seconds']=ahead['seconds']
             if ahead is None:extracted=extraction.extract(original)
-            elif 'extraction_error' in ahead:raise reading.ReadingFailed(ahead['extraction_error'])
+            elif 'extraction_error' in ahead:raise reading.ReadingFailed(ahead['extraction_error'],ahead.get('failure'))
             else:extracted=ahead['extracted']
             source_format = extracted.get('format')
             if type(source_format) is str and source_format in EXTRACTED_DIAGNOSTIC_FORMATS:
@@ -294,8 +347,9 @@ class Workspace:
             if not any(page.strip() for page in extracted['pages']):raise ValueError('В файле не обнаружен читаемый текст')
             attempt['stage'] = 'analysis'
             if ahead is None:parsed=analysis.analyze(extracted,path.name)
-            elif 'analysis_error' in ahead:raise reading.ReadingFailed(ahead['analysis_error'])
+            elif 'analysis_error' in ahead:raise reading.ReadingFailed(ahead['analysis_error'],ahead.get('failure'))
             else:parsed=ahead['parsed']
+            if ahead is None:attempt['seconds']=time.monotonic()-started
             attempt['stage'] = 'storage'
             fingerprint=analysis.content_fingerprint(extracted['pages'])
             matches = db.execute('SELECT * FROM documents WHERE fingerprint=? ORDER BY created,id', (fingerprint,)).fetchall() if fingerprint else []
@@ -356,9 +410,10 @@ class Workspace:
 
     @staticmethod
     def _category(record, parsed):
+        """Only an unknown patient stops a document. Quality flags travel with its values."""
         if parsed.get('duplicate_of'):
             return 'Дубли'
-        if not record['patient_id'] or quality.needs_review(parsed):
+        if not record['patient_id']:
             return 'Нужно уточнить'
         return 'Обработано'
 
@@ -372,6 +427,22 @@ class Workspace:
                 source = arrival['destination']
             db.execute("UPDATE arrivals SET source=?,destination=NULL,category=?,status='pending' WHERE id=?",
                        (source, category, arrival['id']))
+
+    def _apply_filing_rule(self, db):
+        """Schedule moves for files an earlier rule held back. True when a file has to move."""
+        rule = db.execute("SELECT value FROM meta WHERE key='filing_rule'").fetchone()
+        if rule and rule[0] == FILING_RULE:
+            return False
+        scheduled = False
+        for record in db.execute('''SELECT DISTINCT documents.id, documents.patient_id, documents.analysis
+                                    FROM documents JOIN arrivals ON arrivals.document_id=documents.id
+                                    WHERE arrivals.category='Нужно уточнить' ''').fetchall():
+            category = self._category(record, self._load_analysis(record, db=db))
+            if category != 'Нужно уточнить':
+                self._schedule_category(db, record['id'], category)
+                scheduled = True
+        db.execute('INSERT OR REPLACE INTO meta VALUES (?,?)', ('filing_rule', FILING_RULE))
+        return scheduled
 
     def resolve_patients(self,db):
         records=[dict(row) for row in db.execute('SELECT * FROM documents')]
@@ -402,21 +473,43 @@ class Workspace:
         relative=Path(arrival['source']).relative_to(self.root)
         parent=relative.parent
         if parent.parts and parent.parts[0] in MANAGED|{'Входящие'}:parent=Path(*parent.parts[1:])
-        # Preserve patient subfolders, while bounding long names on Windows.
-        parts=[part[:65] for part in parent.parts]
+        # Patient subfolders stay. Queue folder names are already bounded; a long path shortens
+        # the file name, then joins the chain into one folder, but never drops the folder a file lies in.
+        from .intake import FILE_ROOM, collapsed_folder
+        parts=list(parent.parts)
         filename=Path(arrival['source']).name
-        target=self.root/arrival['category']/Path(*parts)/filename
+        folder=self.root/arrival['category']/Path(*parts)
+        if parts and len(str(folder))+1+FILE_ROOM>230:
+            # A queue folder that is already one short name keeps it: the file name gives way instead.
+            collapsed=collapsed_folder(parts,parts)
+            if len(parts)>1 or len(parts[0])>len(collapsed):
+                folder=self.root/arrival['category']/collapsed
+        target=folder/filename
         if len(str(target))>230:
-            target=self.root/arrival['category']/(Path(filename).stem[:70]+'_'+arrival['hash'][:12]+Path(filename).suffix)
+            target=folder/(Path(filename).stem[:40].rstrip(' .')+'_'+arrival['hash'][:12]+Path(filename).suffix)
         if target.exists() and sha256(target)!=arrival['hash']:
             target=target.with_name(target.stem+'_'+arrival['hash'][:12]+target.suffix)
         return target
+
+    def _prune_incoming(self,folder):
+        """Drop queue folders emptied by filing their documents, never the queue itself."""
+        incoming=self.root/'Входящие'
+        while incoming in folder.parents:
+            try:folder.rmdir()
+            except OSError:return
+            folder=folder.parent
 
     def finish_moves(self,db,progress):
         attempt_epochs = getattr(self._diagnostic_local, 'attempt_epochs', None) or {}
         for row in db.execute("SELECT * FROM arrivals WHERE status='pending' ORDER BY id").fetchall():
             epoch = attempt_epochs.get(row['source'], _CURRENT_EPOCH)
-            source=Path(row['source']);target=Path(row['destination']) if row['destination'] else self.destination(row)
+            source=Path(row['source'])
+            try:target=Path(row['destination']) if row['destination'] else self.destination(row)
+            except ValueError:
+                # A path outside this work folder cannot be filed here. It waits, as any failed move.
+                self._diagnostic('failure_stages', 'archive', epoch=epoch)
+                with db:db.execute('UPDATE arrivals SET error=? WHERE id=?',('Файл находится вне рабочей папки. Перенесите его вручную.',row['id']))
+                continue
             with db:db.execute('UPDATE arrivals SET destination=? WHERE id=?',(str(target),row['id']))
             try:
                 target.parent.mkdir(parents=True,exist_ok=True)
@@ -431,7 +524,9 @@ class Workspace:
                     if sha256(temporary)!=row['hash']:raise RuntimeError('Не удалось проверить копию файла')
                     os.replace(temporary,target)
                 if sha256(target)!=row['hash']:raise RuntimeError('В архиве уже есть другой файл с таким именем')
-                if source.exists() and source!=target:source.unlink()
+                if source.exists() and source!=target:
+                    source.unlink()
+                    self._prune_incoming(source.parent)
                 with db:
                     db.execute("UPDATE arrivals SET status='done',error='' WHERE id=?",(row['id'],))
                     self.event(db,'moved',json.dumps({'arrival':row['id'],'destination':str(target)},ensure_ascii=False))
@@ -467,6 +562,7 @@ class Workspace:
                 self.backup(db)
             paths,skipped=self.files();batch=[];progress(total=len(paths),done=0,phase='Чтение файлов',skipped=len(skipped))
             readings=parallel.ordered_map(reading.read_original,self._import_jobs(db,paths),total=len(paths),
+                                          on_broken=lambda:self._diagnostic('errors','worker_crash'),
                                           workers=parallel.worker_count(IMPORT_MEMORY_PER_WORKER))
             # Closing stops the worker processes when the loop ends early.
             with closing(readings):
@@ -485,6 +581,9 @@ class Workspace:
                         batch.append({'file':path.name,'source':str(path),'status':result,'document_id':document_id})
                     except Exception as exc:
                         self._diagnostic('failure_stages', attempt['stage'], epoch=attempt['epoch'])
+                        if isinstance(exc,reading.ReadingFailed):
+                            if exc.place:self._diagnostic('errors',exc.place,epoch=attempt['epoch'])
+                        else:self._diagnostic_failure(attempt['stage'],exc,epoch=attempt['epoch'])
                         try:digest=sha256(path)
                         except OSError:digest='unreadable-'+hashlib.sha256(str(path).encode()).hexdigest()
                         with db:
@@ -511,11 +610,12 @@ class Workspace:
                 if item['status']=='Добавлен':
                     record=db.execute('SELECT * FROM documents WHERE id=?',(item['document_id'],)).fetchone()
                     parsed = self._load_analysis(record)
-                    self._diagnostic_document(record, parsed, epoch=attempt['epoch'])
                     if not record['patient_id']:
                         item['status']='Уточнить пациента'
                     elif quality.needs_review(parsed):
-                        item['status']='Проверить данные'
+                        item['status']='С пометками'
+                    outcome={'Уточнить пациента':'identity_review','С пометками':'saved_flagged'}.get(item['status'],'saved')
+                    self._diagnostic_document(record, parsed, epoch=attempt['epoch'], outcome=outcome, attempt=attempt)
                 self._diagnostic_import_outcome(db, item, attempt)
             result['batch']=batch
             result['remaining']=max(0,len(paths)-len(batch))
@@ -526,7 +626,7 @@ class Workspace:
         if attempt['epoch'] is None or item['status'] == 'Ошибка':
             return
         outcomes = {'Добавлен': 'saved', 'Повтор': 'duplicate',
-                    'Уточнить пациента': 'identity_review', 'Проверить данные': 'quality_review'}
+                    'Уточнить пациента': 'identity_review', 'С пометками': 'saved_flagged'}
         try:
             pending = db.execute(
                 "SELECT 1 FROM arrivals WHERE document_id=? AND source=? AND status='pending' LIMIT 1",
@@ -560,7 +660,7 @@ class Workspace:
             with self.connect() as connection:return self.summary(connection)
         has_documents = False
         patients = set()
-        documents = identity = uncertain = total_review = incomplete = reparse = 0
+        documents = identity = uncertain = incomplete = reparse = scanned = unparsed = 0
         for row in db.execute('SELECT id, patient_id, analysis FROM documents'):
             has_documents = True
             parsed = self._load_analysis(row, db=db)
@@ -571,10 +671,11 @@ class Workspace:
             if patient_id:
                 patients.add(patient_id)
             needs_identity = not patient_id
-            needs_quality = quality.needs_review(parsed)
+            flags = quality.issues(parsed)
             identity += needs_identity
-            uncertain += needs_quality
-            total_review += needs_identity or needs_quality
+            uncertain += bool(flags)
+            scanned += any(issue.get('code') in quality.SCAN_CODES for issue in flags)
+            unparsed += bool(quality.unparsed_rows(flags))
             incomplete += bool(parsed['quality'].get('confirmed') and parsed['quality'].get('incomplete'))
             reparse += self._can_reparse(parsed)
         workbook = self.root / 'Исследования.xlsx'
@@ -591,8 +692,12 @@ class Workspace:
             'documents': documents,
             'patients': len(patients),
             'review': identity,
+            # Documents with flags are saved and in the table. Checking them is optional.
             'quality_review': uncertain,
-            'total_review': total_review,
+            'scanned': scanned,
+            'unparsed': unparsed,
+            # Only documents a person must act on: the patient is unknown.
+            'total_review': identity,
             'incomplete': incomplete,
             'reparse': reparse,
             **dict(arrivals),
@@ -606,11 +711,46 @@ class Workspace:
     def review_list(self):
         with self.connect() as db:
             result=[]
+            # Folders where somebody is already known: one more answer there does not pass to the rest.
+            settled={row['folder'] for row in db.execute('SELECT DISTINCT folder FROM documents WHERE patient_id IS NOT NULL')}
             for row in db.execute('SELECT * FROM documents WHERE patient_id IS NULL ORDER BY created'):
                 a=self._load_analysis(row)
                 if a.get('duplicate_of'):continue
-                result.append({'id':row['id'],'filename':row['filename'],'reason':row['reason'],'names':a['names'],'births':a['births'],'candidates':json.loads(row['candidates']),'identity_from_ocr':bool(a.get('identity_from_ocr'))})
+                result.append({'id':row['id'],'filename':row['filename'],'reason':row['reason'],'names':a['names'],'births':a['births'],'candidates':json.loads(row['candidates']),'identity_from_ocr':bool(a.get('identity_from_ocr')),'scan':bool(a.get('ocr_pages')),'folder':row['folder'],'folder_settled':row['folder'] in settled})
             return result
+
+    def remember_source(self,digest,path):
+        """Note where a file was added from. Only the window reads it back, to open the file."""
+        try:
+            with self.connect() as db:
+                db.execute('INSERT OR REPLACE INTO external_sources VALUES (?,?,?)',(digest,str(Path(path).resolve()),now()))
+        except sqlite3.Error:
+            pass  # Without it the window opens the copy in the work folder. Adding the file still works.
+
+    def document_location(self,document_id):
+        """The file as the doctor knows it: where it was added from while it is still there,
+        otherwise its copy in the work folder, otherwise the program's own copy."""
+        with self.connect() as db:
+            record=db.execute('SELECT hash,filename,folder,original FROM documents WHERE id=?',(document_id,)).fetchone()
+            if record is None:raise ValueError('Документ не найден')
+            external=[row['path'] for row in db.execute(
+                'SELECT path FROM external_sources WHERE hash=? ORDER BY created DESC',(record['hash'],))]
+            arrivals=db.execute('SELECT source,destination,status FROM arrivals WHERE document_id=? ORDER BY id DESC',(document_id,)).fetchall()
+        try:size=Path(record['original']).stat().st_size
+        except OSError:size=None
+        for value in external:
+            path=Path(value)
+            # A file replaced at the same place is another document: then the copy opens instead.
+            if path.is_file() and (size is None or path.stat().st_size==size):
+                return {'path':path,'folder':str(path.parent),'filename':path.name,'external':True}
+        for arrival in arrivals:
+            for value in (arrival['destination'] if arrival['status']=='done' else None,arrival['source'],arrival['destination']):
+                if value and Path(value).is_file():
+                    path=Path(value)
+                    try:folder=str(path.parent.relative_to(self.root))
+                    except ValueError:folder=str(path.parent)
+                    return {'path':path,'folder':folder,'filename':path.name,'external':False}
+        return {'path':Path(record['original']),'folder':record['folder'],'filename':record['filename'],'external':False}
 
     def document(self,document_id):
         with self.connect() as db:
@@ -656,6 +796,7 @@ class Workspace:
                 patient_id=existing['id'] if existing else 'P-'+uuid.uuid4().hex[:12]
                 if patient_id==record['patient_id']:raise ValueError('Этот пациент уже назначен документу.')
                 previous=db.execute('SELECT name,birth FROM patients WHERE id=?',(record['patient_id'],)).fetchone()
+                if previous:self._diagnostic('accuracy','patient_changed.'+diagnostic_events.change_basis(dict(record)),epoch=epoch)
                 was=f"{previous['name']}, {previous['birth']}" if previous else 'не назначен'
                 self._save_study_history(db,record,'patient_changed',' '.join(filter(None,(f'Прежний пациент: {was}.',note.strip()))))
                 db.execute('INSERT OR IGNORE INTO patients VALUES (?,?,?)',(patient_id,name,birth))
@@ -668,6 +809,7 @@ class Workspace:
                 parsed=self._load_analysis(record)
                 self._schedule_category(db,document_id,self._category({'patient_id':patient_id},parsed))
                 self.touch(db);self.event(db,'patient_changed',document_id)
+                self.resolve_patients(db)
             self._diagnostic('edit_categories','identity',epoch=epoch)
             return self._finish_review_change(db)
 
@@ -687,8 +829,12 @@ class Workspace:
             record=db.execute('SELECT * FROM documents WHERE id=?',(document_id,)).fetchone()
             if not record:raise ValueError('Документ не найден')
             if record['patient_id']:raise ValueError('Пациент уже подтверждён. Обновите список документов.')
-            with db:self._assign_record(db,record,name,birth,'Пациент подтверждён пользователем')
+            with db:
+                self._assign_record(db,record,name,birth,'Пациент подтверждён пользователем')
+                # One answer covers the patient's folder: its other unnamed documents follow.
+                self.resolve_patients(db)
             self._diagnostic('edit_categories', 'identity', epoch=epoch)
+            self._diagnostic('reading', 'patient.person', epoch=epoch)
             self._export_workbook(db)
             self.finish_moves(db,lambda **kw:None)
             self.backup(db)
@@ -708,7 +854,10 @@ class Workspace:
                     if record and not record['patient_id']:
                         self._assign_record(db,record,name,birth,'Пациент подтверждён пользователем списком')
                         assigned+=1
-            if assigned:self._diagnostic('edit_categories','identity',assigned,epoch=epoch)
+                if assigned:self.resolve_patients(db)
+            if assigned:
+                self._diagnostic('edit_categories','identity',assigned,epoch=epoch)
+                self._diagnostic('reading','patient.person',assigned,epoch=epoch)
             return {**self._finish_review_change(db),'assigned':assigned}
 
     @staticmethod
@@ -937,6 +1086,9 @@ class Workspace:
                 parsed['date'] = self._review_date(date)
             if study_type is not None:
                 parsed['type'] = study_type.strip() or 'Документ'
+            previous_rows = [dict(row) for row in parsed['observations']]
+            from .review_queue import page_line
+            unread = [page_line(parsed, issue.get('page_index'), issue.get('line')) for issue in parsed.get('table_issues', ())]
             parsed['observations'] = self._reviewed_observations(parsed, observations, previous_date, checked_ids)
             parsed['sections'] = self._reviewed_sections(parsed, sections)
             self._resolve_table_lines(parsed, resolved_lines)
@@ -970,6 +1122,11 @@ class Workspace:
                 self.event(db, 'quality_confirmed', document_id)
             self._diagnostic('review_outcomes', 'confirmed_incomplete' if incomplete else 'confirmed', epoch=epoch)
             self._diagnostic_review_changes(record, parsed, epoch=epoch)
+            try:
+                self._diagnostic_counters(diagnostic_events.accuracy_codes(
+                    previous_rows, parsed['observations'], checked_ids, unread), epoch=epoch)
+            except Exception:
+                pass
             if defer_export:
                 return {**self.summary(db), 'revision': self._revision(db)}
             return self._finish_review_change(db)
@@ -1241,7 +1398,7 @@ class Workspace:
                 if not row['patient_id']:
                     status = 'Уточнить пациента'
                 elif quality.needs_review(parsed):
-                    status = 'Проверить данные'
+                    status = 'Не сверено'
                 elif parsed['quality'].get('confirmed'):
                     status = 'Сверено с замечаниями' if parsed['quality'].get('incomplete') else 'Проверено'
                 else:

@@ -93,8 +93,8 @@ class QualityTests(unittest.TestCase):
         self.assertIn('ambiguous_value', codes(result))
 
     def test_longer_unit_does_not_fall_back_to_prefix(self):
-        result = parsed(IDENTITY + DATE + 'Учебный показатель 12 мм/ч.')
-        self.assertEqual(result['observations'][0]['unit'], 'мм/ч')
+        from patient_importer.analysis import MEASUREMENT
+        self.assertEqual(MEASUREMENT.search('Учебный показатель 12 мм/ч.')['unit'], 'мм/ч')
 
     def test_units_and_metadata_do_not_count_as_lab_results(self):
         result = parsed(IDENTITY + DATE + LAB + 'Гемоглобин  г/л\n'

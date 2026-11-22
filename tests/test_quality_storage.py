@@ -26,17 +26,18 @@ class QualityStorageTests(unittest.TestCase):
     def parsed(self, document_id):
         return json.loads(self.workspace.document(document_id)['analysis'])
 
-    def test_confirming_patient_leaves_draft_until_separate_review(self):
+    def test_confirming_patient_files_the_document_and_leaves_flags_until_review(self):
         self.add('вымышленный.txt', SAMPLE.replace('Дата рождения: 01.01.2000\n', '').replace('71.5   мкмоль/л   (40 - 90)', '71.5'))
         result = self.workspace.import_folder()
         self.assertEqual((result['review'], result['quality_review'], result['total_review']), (1, 1, 1))
         document_id = self.workspace.review_list()[0]['id']
         result = self.workspace.assign(document_id, 'ТЕСТОВ ТЕСТ ТЕСТОВИЧ', '2000-01-01')
-        self.assertEqual((result['review'], result['quality_review'], result['total_review']), (0, 1, 1))
-        self.assertTrue((self.workspace.root/'Нужно уточнить'/'вымышленный.txt').exists())
+        # The flags stay, but nothing waits for a person any more.
+        self.assertEqual((result['review'], result['quality_review'], result['total_review']), (0, 1, 0))
+        self.assertTrue((self.workspace.root/'Обработано'/'вымышленный.txt').exists())
         book = load_workbook(self.workbook)
-        self.assertEqual(book['Исследования']['F2'].value, 'Проверить данные')
-        self.assertEqual(book['Показатели']['P2'].value, 'Черновик · сверить')
+        self.assertEqual(book['Исследования']['F2'].value, 'Не сверено · нет единицы')
+        self.assertEqual(book['Показатели']['P2'].value, 'Не сверено · нет единицы')
         review = self.workspace.quality_review_list()[0]
         self.assertTrue(any(issue['code']=='missing_unit' for issue in review['issues']))
         rows = review['observations']
@@ -60,7 +61,7 @@ class QualityStorageTests(unittest.TestCase):
         self.add('неполный.txt', 'Пациент: ТЕСТОВ ТЕСТ ТЕСТОВИЧ\nДата рождения: 01.01.2000\n')
         result = self.workspace.import_folder()
         document_id = result['batch'][0]['document_id']
-        self.assertEqual(result['batch'][0]['status'], 'Проверить данные')
+        self.assertEqual(result['batch'][0]['status'], 'С пометками')
         with self.assertRaisesRegex(ValueError, 'замечания'):
             self.workspace.confirm_quality(document_id, note='Сверены все страницы и строки оригинала')
         self.workspace.confirm_quality(document_id, note='В учебном оригинале отсутствуют дата и результаты.')

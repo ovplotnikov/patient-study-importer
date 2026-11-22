@@ -66,6 +66,8 @@ BASELINE_SHEETS = ('Пациенты', 'Исследования', 'Показа
 BASELINE_ANALYSIS_FIELDS = ('names', 'births', 'cards', 'date', 'date_candidates', 'page_numbers', 'type',
                             'type_candidates', 'observations', 'sections', 'problems', 'table_issues')
 ADDED_OBSERVATION_FIELDS = ('suspect_reference',)
+# Columns a release added on purpose to a baseline sheet. The rest of the sheet must not change.
+ADDED_COLUMNS = {'Исследования': ('Не перенесено строк',)}
 
 
 def workbook_fingerprint(path):
@@ -76,8 +78,11 @@ def workbook_fingerprint(path):
     try:
         for name in BASELINE_SHEETS:
             digest.update(name.encode('utf-8') + b'\0')
-            for row in book[name].iter_rows(values_only=True):
-                digest.update(repr(row).encode('utf-8'))
+            rows = book[name].iter_rows(values_only=True)
+            header = next(rows, ())
+            keep = [index for index, title in enumerate(header) if title not in ADDED_COLUMNS.get(name, ())]
+            for row in ((header, *rows) if header else ()):
+                digest.update(repr(tuple(row[index] for index in keep if index < len(row))).encode('utf-8'))
     finally:
         book.close()
     return digest.hexdigest()

@@ -9,44 +9,92 @@ import threading
 import time
 
 from patient_importer.telemetry_schema import (
-    COUNTERS_PATH, MAX_REPORT_BYTES, MIN_ATTEMPTS, valid_version, validate_report,
+    COUNTERS_PATH, DEFAULT_CODES_PER_WEEK, MAX_CODES_PER_WEEK, MAX_REPORT_BYTES, MAX_VERSIONS_PER_WEEK,
+    OTHER, OTHER_VERSION, REFUSALS, receive_report, week_of,
 )
 
 HEALTH_PATH = '/healthz'
+MAX_ROWS_PER_WEEK = 6000
 MAX_TOTAL = 2**53 - 1
 CONTENT_TYPE = re.compile(r'application/json(?:[ \t]*;[ \t]*charset[ \t]*=[ \t]*(?:utf-8|"utf-8"))?', re.I | re.ASCII)
 
 
 class CounterStore:
-    def __init__(self, database):
+    """Sums by receiving week, version, group and code; accepted and refused reports by week.
+
+    The week comes from this server's clock. Nothing else about a request is kept.
+    """
+    def __init__(self, database, clock=None):
         self.database = Path(database)
+        self.clock = clock
         self.database.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         with closing(self.connect()) as db, db:
             db.execute("""
-                CREATE TABLE IF NOT EXISTS counters (
-                    app_version TEXT NOT NULL,
-                    metric TEXT NOT NULL,
-                    code TEXT NOT NULL,
-                    total INTEGER NOT NULL,
-                    PRIMARY KEY (app_version, metric, code)
+                CREATE TABLE IF NOT EXISTS weekly_counters (
+                    week TEXT NOT NULL, app_version TEXT NOT NULL, metric TEXT NOT NULL,
+                    code TEXT NOT NULL, total INTEGER NOT NULL,
+                    PRIMARY KEY (week, app_version, metric, code)
+                ) WITHOUT ROWID
+            """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS reception (
+                    week TEXT NOT NULL, outcome TEXT NOT NULL, reason TEXT NOT NULL, total INTEGER NOT NULL,
+                    PRIMARY KEY (week, outcome, reason)
                 ) WITHOUT ROWID
             """)
 
     def connect(self):
         return sqlite3.connect(self.database, timeout=2)
 
+    def week(self):
+        return week_of(self.clock() if self.clock else None)
+
     def add(self, report):
-        rows = [
-            (report['app_version'], metric, code, count, MAX_TOTAL)
-            for metric, counts in report['counters'].items()
-            for code, count in counts.items()
-        ]
+        """Store one accepted report. False when this week is full: the report is refused."""
+        week = self.week()
         with closing(self.connect()) as db, db:
+            versions = {row[0] for row in db.execute(
+                'SELECT DISTINCT app_version FROM weekly_counters WHERE week=?', (week,))}
+            version = report['app_version']
+            if version not in versions and len(versions - {OTHER_VERSION}) >= MAX_VERSIONS_PER_WEEK:
+                version = OTHER_VERSION
+            rows = []
+            for metric, counts in report['counters'].items():
+                known = {row[0] for row in db.execute(
+                    'SELECT DISTINCT code FROM weekly_counters WHERE week=? AND metric=?', (week, metric))}
+                limit = MAX_CODES_PER_WEEK.get(metric, DEFAULT_CODES_PER_WEEK)
+                for code, count in counts.items():
+                    if code not in known and len(known - {OTHER}) >= limit:
+                        code = OTHER
+                    known.add(code)
+                    rows.append((week, version, metric, code, count, MAX_TOTAL))
+            stored = db.execute('SELECT count(*) FROM weekly_counters WHERE week=?', (week,)).fetchone()[0]
+            new = {row[:4] for row in rows} - {key for key in (
+                tuple(item) for item in db.execute(
+                    'SELECT week, app_version, metric, code FROM weekly_counters WHERE week=?', (week,)))}
+            if stored + len(new) > MAX_ROWS_PER_WEEK - 1:  # The sheet of Code.gs keeps a header row.
+                return False
             db.executemany("""
-                INSERT INTO counters (app_version, metric, code, total) VALUES (?, ?, ?, ?)
-                ON CONFLICT (app_version, metric, code)
+                INSERT INTO weekly_counters (week, app_version, metric, code, total) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (week, app_version, metric, code)
                 DO UPDATE SET total = min(total + excluded.total, ?)
             """, rows)
+            self._reception(db, week, 'accepted', 'schema_' + str(report['schema_version']))
+        return True
+
+    def refuse(self, reason):
+        try:
+            with closing(self.connect()) as db, db:
+                self._reception(db, self.week(), 'refused', reason if reason in REFUSALS else 'format')
+        except sqlite3.Error:
+            pass
+
+    @staticmethod
+    def _reception(db, week, outcome, reason):
+        db.execute("""
+            INSERT INTO reception (week, outcome, reason, total) VALUES (?, ?, ?, 1)
+            ON CONFLICT (week, outcome, reason) DO UPDATE SET total = min(total + 1, ?)
+        """, (week, outcome, reason, MAX_TOTAL))
 
 
 def unique_fields(pairs):
@@ -63,9 +111,15 @@ def invalid_constant(_):
 
 
 def decode_report(body):
-    payload = json.loads(body.decode('utf-8'), object_pairs_hook=unique_fields,
+    """The report with unknown codes folded, or ValueError. Only printable ASCII is accepted."""
+    if any(not 0x20 <= byte <= 0x7e for byte in body):
+        raise ValueError('Not ASCII')
+    payload = json.loads(body.decode('ascii'), object_pairs_hook=unique_fields,
                          parse_constant=invalid_constant)
-    return validate_report(payload)
+    report, reason = receive_report(payload)
+    if report is None:
+        raise ValueError(reason)
+    return report
 
 
 class RequestBudget:
@@ -128,7 +182,7 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(404)
             return
         if not self.server.budget.take():
-            self.reply(429)
+            self.refuse(429, 'rate_limited')
             return
         if self.headers.get_all('Expect'):
             self.reply(417)
@@ -138,7 +192,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         content_type = self.headers.get_all('Content-Type') or []
         if len(content_type) != 1 or not CONTENT_TYPE.fullmatch(content_type[0]):
-            self.reply(415)
+            self.refuse(415, 'content_type')
             return
         lengths = self.headers.get_all('Content-Length') or []
         if len(lengths) != 1 or not re.fullmatch(r'[0-9]{1,10}', lengths[0]):
@@ -146,37 +200,38 @@ class Handler(BaseHTTPRequestHandler):
             return
         length = int(lengths[0])
         if not 0 < length <= MAX_REPORT_BYTES:
-            self.reply(413 if length else 400)
+            self.refuse(413 if length else 400, 'too_large' if length else 'format')
             return
         try:
             body = self.rfile.read(length)
             if len(body) != length:
                 raise ValueError('Incomplete body')
             report = decode_report(body)
-            if report['app_version'] not in self.server.allowed_versions:
-                raise ValueError('Unknown version')
-            if sum(report['counters'].get('formats', {}).values()) < MIN_ATTEMPTS:
-                raise ValueError('Report below aggregate threshold')
         except (ValueError, RecursionError):
-            self.reply(400)
+            self.refuse(400, 'format')
             return
         try:
-            self.server.store.add(report)
+            stored = self.server.store.add(report)
         except (sqlite3.Error, OSError):
-            self.reply(503)
+            self.refuse(503, 'storage')
+            return
+        if not stored:
+            self.refuse(507, 'full')
             return
         self.reply(204)
+
+    def refuse(self, code, reason):
+        self.server.store.refuse(reason)
+        self.reply(code)
 
 
 class CounterServer(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 16
 
-    def __init__(self, port, store, allowed_versions, *, per_minute=60, burst=20):
+    def __init__(self, port, store, allowed_versions=(), *, per_minute=60, burst=20):
+        # Any version of the right form is accepted now; the argument stays for old configurations.
         self.store = store
-        self.allowed_versions = frozenset(allowed_versions)
-        if not 0 < len(self.allowed_versions) <= 8 or not all(map(valid_version, self.allowed_versions)):
-            raise ValueError('Configure one to eight known x.y.z versions')
         self.budget = RequestBudget(per_minute, burst)
         self.slots = threading.BoundedSemaphore(8)
         super().__init__(('127.0.0.1', port), Handler)

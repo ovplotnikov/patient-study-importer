@@ -19,10 +19,12 @@ def lab(label, result, unit='', number='auto', origin='Лабораторный 
 
 
 def study(kind='ОАК', day='2015-03-02', observations=(), sections=(), patient='P-1', name='ТЕСТОВ ТЕСТ ТЕСТОВИЧ',
-          status='Готово', document='S-1'):
+          status='Готово', document='S-1', flags=None, ocr_pages=()):
+    """`flags` makes an unverified study, as the workbook passes it: reasons other than a scan."""
     return {'id': document, 'patient_id': patient, 'name': name if patient else '', 'birth': '2010-01-15' if patient else '',
             'date': day, 'kind': kind, 'status': status, 'filename': 'учебный.pdf',
-            'observations': list(observations), 'sections': list(sections)}
+            'observations': list(observations), 'sections': list(sections),
+            'verified': flags is None, 'flags': list(flags or ()), 'scan_text': bool(ocr_pages), 'ocr_pages': set(ocr_pages)}
 
 
 def table(built, name):
@@ -159,7 +161,7 @@ class ReportSheetTests(unittest.TestCase):
 class SummaryTests(unittest.TestCase):
     def built(self):
         return sheets.build([study(day='2015-03-02', observations=[lab('Гемоглобин', '120', 'г/л')]),
-                             study(day='2017-05-01', document='S-2', observations=[lab('Гемоглобин', '130', 'г/л')], status='Проверить данные'),
+                             study(day='2017-05-01', document='S-2', observations=[lab('Гемоглобин', '130', 'г/л')], status='Не сверено', flags=[]),
                              study(kind='Биохимия крови', day='2016-01-01', document='S-3', observations=[lab('Креатинин', '50', 'мкмоль/л')])])
 
     def test_one_row_per_patient_with_the_latest_study_of_each_kind(self):
@@ -169,7 +171,7 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(rows[0]['Биохимия крови: Креатинин (мкмоль/л)'], 50.0)
 
     def test_unchecked_source_is_marked(self):
-        self.assertEqual(table(self.built(), 'Свод')[0]['Есть несверенные данные'], 'Да')
+        self.assertEqual(table(self.built(), 'Свод')[0]['Есть несверенные данные'], 'Да: ОАК')
 
     def test_study_without_a_date_is_not_the_latest(self):
         built = sheets.build([study(day='2015-03-02', observations=[lab('Гемоглобин', '120', 'г/л')]),

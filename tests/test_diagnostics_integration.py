@@ -11,7 +11,14 @@ from unittest.mock import patch
 from patient_importer.smoke import SAMPLE
 from patient_importer.storage import Workspace
 from patient_importer.telemetry import Diagnostics
-from patient_importer.telemetry_schema import MAX_COUNT, METRICS
+from patient_importer.telemetry_schema import MAX_COUNT, valid_code
+
+# Groups of the first contract. New groups (reading, speed, errors…) are checked in test_diagnostics_v2.
+LEGACY = ('formats', 'outcomes', 'review_reasons', 'review_outcomes', 'edit_categories', 'failure_stages')
+
+
+def legacy(counters):
+    return {metric: codes for metric, codes in counters.items() if metric in LEGACY}
 
 
 class Capture:
@@ -56,7 +63,7 @@ class DiagnosticsIntegrationTests(unittest.TestCase):
                 for code, count in bucket.items():
                     self.assertIs(type(metric), str)
                     self.assertIs(type(code), str)
-                    self.assertIn(code, METRICS[metric])
+                    self.assertTrue(valid_code(metric, code), (metric, code))
                     self.assertIs(type(count), int)
                     self.assertTrue(1 <= count <= MAX_COUNT)
         payload = json.dumps(self.capture.calls, ensure_ascii=False)
@@ -114,7 +121,7 @@ class DiagnosticsIntegrationTests(unittest.TestCase):
                                        note=private[7], expected_revision=record['revision'])
         counts = self.capture.counts
         self.assertEqual(counts['review_reasons', 'OCR_USED'], 1)
-        self.assertEqual(counts['outcomes', 'quality_review'], 1)
+        self.assertEqual(counts['outcomes', 'saved_flagged'], 1)
         self.assertEqual(counts['review_outcomes', 'confirmed_incomplete'], 1)
         for category in ('result', 'unit', 'reference', 'observation', 'conclusion'):
             self.assertEqual(counts['edit_categories', category], 1)
@@ -172,7 +179,8 @@ class DiagnosticsIntegrationTests(unittest.TestCase):
         reopened.summary()
         reopened.quality_review_list()
         reopened.import_folder()
-        self.assertEqual(self.capture.calls, [])
+        # Saving the table again is an action of now; nothing about past documents is replayed.
+        self.assertEqual([call for call in self.capture.calls if set(call) != {'speed'}], [])
 
     def test_enabling_during_import_does_not_count_a_preconsent_attempt(self):
         self.capture.enabled = False
@@ -183,7 +191,7 @@ class DiagnosticsIntegrationTests(unittest.TestCase):
                 self.capture.enabled = True
 
         self.workspace.import_folder(progress=opt_in)
-        self.assertEqual(self.capture.calls, [])
+        self.assertEqual([call for call in self.capture.calls if set(call) != {'speed'}], [])
 
     def test_large_import_persists_one_diagnostics_update(self):
         diagnostics = self.live_diagnostics()
@@ -193,7 +201,7 @@ class DiagnosticsIntegrationTests(unittest.TestCase):
             result = self.workspace.import_folder()
             write.assert_called_once()
         self.assertEqual(len(result['batch']), 1000)
-        self.assertEqual(diagnostics.snapshot()['counters'], {
+        self.assertEqual(legacy(diagnostics.snapshot()['counters']), {
             'formats': {'txt': 1000}, 'outcomes': {'saved': 1, 'duplicate': 999},
         })
 
@@ -227,9 +235,11 @@ class DiagnosticsIntegrationTests(unittest.TestCase):
         self.assertEqual(result['quality_review'], 1)
         self.assertEqual(result['errors'], 1)
         self.assertTrue(review.is_file())
-        self.assertEqual(diagnostics.snapshot()['counters'], {
-            'formats': {'txt': 1}, 'outcomes': {'saved': 1},
-        })
+        counters = diagnostics.snapshot()['counters']
+        self.assertEqual(legacy(counters), {'formats': {'txt': 1}, 'outcomes': {'saved': 1}})
+        # Only the document read after the new consent is described; the failure before it is not.
+        self.assertEqual(sum(code.startswith('outcome.') for code in counters['reading']), 1)
+        self.assertNotIn('errors', counters)
 
     def test_opt_out_before_flush_discards_buffered_attempts(self):
         diagnostics = self.live_diagnostics()
@@ -267,11 +277,14 @@ class DiagnosticsIntegrationTests(unittest.TestCase):
             result = self.workspace.import_folder(progress=stop, cancel=cancel)
         self.assertEqual(result['remaining'], 1)
         self.assertTrue(untouched.is_file())
-        self.assertEqual(diagnostics.snapshot()['counters'], {
+        counters = diagnostics.snapshot()['counters']
+        self.assertEqual(legacy(counters), {
             'formats': {'txt': 1, 'pdf': 1},
             'outcomes': {'saved': 1, 'error': 1},
             'failure_stages': {'extraction': 1},
         })
+        place, = counters['errors']
+        self.assertRegex(place, r'^extraction\.ValueError\.[a-z_]+\.[a-z_]+\.[0-9]+$')
 
     def test_concurrent_event_is_not_buffered_in_another_threads_batch(self):
         diagnostics = self.live_diagnostics()
